@@ -129,23 +129,29 @@ pub const TcpOutboundRing = struct {
         const token = self.next_token;
         self.next_token += 1;
 
-        const conn = try self.allocator.create(TcpConn);
-        errdefer self.allocator.destroy(conn);
-        conn.* = .{
-            .fd = fd,
-            .token = token,
-            .state = .connecting,
-            .stream = null,
-            .on_read = null,
-            .on_read_ctx = null,
-            .read_buf = try self.allocator.alloc(u8, TCP_READ_BUF),
-            .wbuf = .{},
-            .wbuf_len = 0,
-            .written = 0,
+        const conn = init: {
+            const c = try self.allocator.create(TcpConn);
+            errdefer self.allocator.destroy(c);
+            c.* = .{
+                .fd = fd,
+                .token = token,
+                .state = .connecting,
+                .stream = null,
+                .on_read = null,
+                .on_read_ctx = null,
+                .read_buf = try self.allocator.alloc(u8, TCP_READ_BUF),
+                .wbuf = .{},
+                .wbuf_len = 0,
+                .written = 0,
+            };
+            break :init c;
         };
+        // After the labeled block, the plain destroy errdefer is out of scope.
+        // Only this errdefer (full deinit) will fire on subsequent failures.
         errdefer conn.deinit(self.allocator);
 
         try self.conns.put(token, conn);
+        errdefer _ = self.conns.remove(token);
 
         try self.ring.connect(token, fd, &addr.any, addr.getOsSockLen());
         _ = self.ring.submit() catch {};
