@@ -219,6 +219,7 @@ pub const TcpOutboundRing = struct {
             conn.fd = -1;
         }
         conn.state = .closing;
+        if (conn.on_close) |cb| cb(conn.on_close_ctx);
     }
 };
 
@@ -229,6 +230,8 @@ pub const TcpConn = struct {
     stream: ?*StreamHandle,
     on_read: ?*const fn (ctx: ?*anyopaque, data: []const u8) void,
     on_read_ctx: ?*anyopaque,
+    on_close: ?*const fn (ctx: ?*anyopaque) void = null,
+    on_close_ctx: ?*anyopaque = null,
     read_buf: []u8,
     wbuf: [65536]u8, // 64KB
     wbuf_len: usize,
