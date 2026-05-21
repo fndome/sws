@@ -159,7 +159,7 @@ line5（64B）：sentinel（0x53574153）+ workspace 联合体 — HTTP/WS/Compu
 ### Ring A + 独立线程出站
 
 **Ring A**（内置）：主服务器 `io_uring` ring — accept、连接读写、DNS、invoke。
-**出站 ring**（Ring B, HTTP 客户端）：运行在独立 OS 线程上的 `io_uring` ring。IO 线程不受出站 I/O 影响。参见 [src/client/README.md](src/client/README.md) 了解为什么 HTTP 客户端内建在 sws 中。
+**出站 ring**（Ring B, HTTP 客户端）：运行在独立 OS 线程上的 `io_uring` ring。IO 线程不受出站 I/O 影响。参见 [src/client/README_CN.md](src/client/README_CN.md) 了解为什么 HTTP 客户端内建在 sws 中。
 
 ```
 Ring A（主服务器，IO 线程）:
