@@ -78,6 +78,12 @@ pub const RingB = struct {
 
     pub fn deinit(self: *RingB) void {
         self.http_cache.deinit();
+        {
+            var it = self.connecting.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+        }
         self.connecting.deinit(self.allocator);
         self.invoke.drain(self.allocator);
         self.dns.deinit();
@@ -118,15 +124,20 @@ pub const RingB = struct {
         }
     }
 
-    pub fn incConnecting(self: *RingB, host: []const u8, port: u16) !u32 {
+    pub fn tryIncConnecting(self: *RingB, host: []const u8, port: u16) !void {
         const key = try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ host, port });
         const entry = try self.connecting.getOrPut(key);
         if (!entry.found_existing) {
+            // First entry for this target — key string is now owned by the map.
             entry.value_ptr.* = 1;
         } else {
+            // Key already exists in the map; free our temporary lookup copy.
+            self.allocator.free(key);
+            if (entry.value_ptr.* >= MAX_CONCURRENT_CONNECTS) {
+                return error.TargetConnectLimitReached;
+            }
             entry.value_ptr.* += 1;
         }
-        return entry.value_ptr.*;
     }
 
     pub fn decConnecting(self: *RingB, host: []const u8, port: u16) void {
@@ -136,21 +147,11 @@ pub const RingB = struct {
             if (v.* > 1) {
                 v.* -= 1;
             } else {
-                _ = self.connecting.remove(key);
+                // Remove and free the key owned by the map.
+                if (self.connecting.fetchRemove(key)) |kv| {
+                    self.allocator.free(kv.key);
+                }
             }
-        }
-    }
-
-    pub fn tryIncConnecting(self: *RingB, host: []const u8, port: u16) !void {
-        const key = try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ host, port });
-        const entry = try self.connecting.getOrPut(key);
-        if (!entry.found_existing) {
-            entry.value_ptr.* = 1;
-        } else {
-            if (entry.value_ptr.* >= MAX_CONCURRENT_CONNECTS) {
-                return error.TargetConnectLimitReached;
-            }
-            entry.value_ptr.* += 1;
         }
     }
 };
