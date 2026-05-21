@@ -143,7 +143,8 @@ pub const TcpOutboundRing = struct {
         const addr = try std.net.Address.parseIp(host, port);
 
         const token = self.next_token;
-        self.next_token += 1;
+        self.next_token +%= 1;
+        if (self.next_token == 0) self.next_token = 1;
 
         const conn = init: {
             const c = try self.allocator.create(TcpConn);
@@ -189,7 +190,6 @@ pub const TcpOutboundRing = struct {
             tsqe.addr = @intFromPtr(&conn.connect_timeout_ts);
             tsqe.len = 1;
         }
-        _ = self.ring.submit() catch {};
         return conn;
     }
 
