@@ -209,6 +209,8 @@ pub const TcpOutboundRing = struct {
         if (conn.state == .idle) {
             conn.submitWrite(&self.ring) catch self.closeConnFd(conn);
         }
+        // When in .reading or .connecting, the write is queued and will be
+        // flushed by submitReadyIo() on the next state transition.
     }
 
     /// Close a connection explicitly. Safe to call multiple times.
