@@ -3,6 +3,8 @@ const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 
 const StreamHandle = @import("../next/chunk_stream.zig").StreamHandle;
+const FiberShared = @import("../shared/fiber_shared.zig").FiberShared;
+const RingTrait = @import("../shared/fiber_shared.zig").RingTrait;
 
 const TCP_READ_BUF = 262144; // 256KB
 
@@ -47,6 +49,18 @@ pub const TcpOutboundRing = struct {
         }
         self.conns.deinit();
         self.ring.deinit();
+    }
+
+    pub fn registerWith(self: *Self, fs: *FiberShared) !void {
+        try fs.register(RingTrait{
+            .ptr = self,
+            .tickFn = tickCb,
+        });
+    }
+
+    fn tickCb(ptr: *anyopaque) void {
+        const self: *TcpOutboundRing = @ptrCast(@alignCast(ptr));
+        self.tick();
     }
 
     /// 非阻塞 tick: 投递 SQEs → 收已有 CQEs → 处理。
