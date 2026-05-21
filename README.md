@@ -39,7 +39,6 @@ IO thread (io_uring Ring A + fiber):
   ├── drain Next.go() ringbuffer tasks
   ├── drain DeferredResponse / InvokeQueue → respond
   ├── drainTick (DNS tick + invoke.drain + tick_hooks)
-  ├── FiberShared.tick() — harvest outbound rings (Ring B/C/D...)
   └── TTL incremental scan (StackPool live list)
 
 Worker pool (optional, offload CPU/GPU/blocking I/O):
@@ -200,6 +199,13 @@ src/http/
 ├── types.zig          (  5)  Middleware / Handler types
 ├── http_helpers.zig   ( 87)  request parsing utilities
 └── middleware_store.zig( 28)  MiddlewareStore
+
+src/client/
+├── http_client.zig    (1132) HttpClient — dedicated-thread, fiber-driven HTTP client
+├── ring.zig           ( 154) RingB — io_uring ring + DNS + TinyCache + InvokeQueue
+├── tiny_cache.zig     ( 267) per-host keep-alive connection pool
+├── dns.zig            ( 184) c-ares async DNS adapter
+└── README.md                 → [Why sws ships its own io_uring HTTP client](src/client/README.md)
 ```
 
 Extracted from a 2725-line God Object in 5 sessions. Each module ≤381 lines, single responsibility. `async_server.zig` is now 526 lines of pure struct definition + init/deinit + forwarding shell.
@@ -216,7 +222,7 @@ IO thread (single):
     → drainPendingResumes (fiber resume queue)
     → drainNextTasks (Next.go ringbuffer tasks)
     → drainTick (DNS tick + invoke.drain + tick_hooks)
-    → FiberShared.tick() (outbound Ring B/C/D harvest)
+    → TTL scan (StackPool live list, incremental)
     → TTL scan (StackPool live list, incremental)
     → loop
 ```
@@ -251,56 +257,27 @@ line5 ( 64B): sentinel (0x53574153) + workspace union — HTTP/WS/Compute view
 
 **Workspace switching:** The `line5.ws` union switches between `HttpWork`, `WsWork`, and `ComputeWork` views depending on connection state — no heap allocation for protocol parsing state.
 
-### Ring A + FiberShared — multi-ring architecture
+### Ring A + Dedicated Thread for Outbound
 
 **Ring A** (built-in): the main server's `io_uring` ring — accept, connection read/write, DNS, invoke.
 
-**Outbound rings** (Ring B, Ring C...): independent io_uring rings for outbound protocols. Registered with `FiberShared`, which the IO thread harvests every event loop iteration — zero extra threads, zero locks.
+**Outbound rings** (Ring B, HTTP client): each runs on its own dedicated OS thread with its own `io_uring` ring. The IO thread is never interrupted for outbound I/O. See [src/client/README.md](src/client/README.md) for why the HTTP client is built-in.
 
 ```
 Ring A (main server, IO thread):
   ├── accept / read / write / close
   ├── io_registry (client callbacks)
   ├── dns_resolver (async UDP DNS)
-  ├── rs.invoke (cross-thread push → IO thread callback)
-  └── FiberShared.tick()
-        ├── Ring B (HTTP client) : ATTACH_WQ → shared io-wq
-        │     ├── DnsResolver
-        │     ├── IORegistry
-        │     ├── InvokeQueue
-        │     └── TinyCache
-        ├── Ring C (NATS client futures)
-        └── Ring D (MySQL client futures)
+  └── rs.invoke (cross-thread push → IO thread callback)
+
+Ring B (HTTP client, dedicated thread):
+  ├── ring.submit_and_wait(1)
+  ├── tick → dns.tick + invoke.drain + copy_cqes + dispatch
+  ├── IORegistry
+  ├── DnsResolver
+  ├── InvokeQueue
+  └── TinyCache (per-host keep-alive pool)
 ```
-
-#### FiberShared
-
-Pure scheduling glue layer. Holds tick handles for all outbound rings. IO thread calls `tick()` every loop iteration to non-blocking harvest CQEs from all registered rings.
-
-```zig
-const FiberShared = @import("sws").FiberShared;
-const RingTrait = @import("sws").RingTrait;
-
-var fiber_shared = try FiberShared.init(allocator);
-defer fiber_shared.deinit();
-
-// Ring B (HTTP client) registers itself
-try ring_b.registerWith(&fiber_shared);
-
-// Any new ring just implements RingTrait:
-//   ptr: *anyopaque  — pointer to ring instance
-//   tickFn: fn(*anyopaque) void  — dns.tick + invoke.drain + submit + copy_cqes + dispatch
-```
-
-#### RingTrait
-
-Contract that every outbound ring must implement:
-
-1. `dns.tick()` — drive DNS query state machine
-2. `invoke.drain()` — process cross-thread task dispatch
-3. `ring.submit()` — submit pending SQEs
-4. `ring.copy_cqes()` — non-blocking harvest CQEs
-5. `registry.dispatch(ud, res)` — dispatch CQEs to registered callbacks
 
 ### Init
 
@@ -318,27 +295,17 @@ Internally, `AsyncServer.init()` creates:
 - `io_registry`: IORegistry — outbound client connection registry
 - `dns_resolver`: DnsResolver — async UDP DNS with TTL cache
 
-To add outbound rings (HTTP/NATS/MySQL), inject `FiberShared`:
+To add the built-in HTTP client:
 
 ```zig
-const FiberShared = @import("sws").FiberShared;
-const RingB = @import("sws").HttpRing;   // same as RingB
-const HttpClient = @import("sws").HttpClient;
-
-var fiber_shared = try FiberShared.init(alloc);
-defer fiber_shared.deinit();
-
-// Ring B with 1s built-in TinyCache TTL:
-var ring_b = try RingB.init(alloc, io, server.ring.fd, 1000);
+// RingB with 1s built-in TinyCache TTL:
+var ring_b = try sws.HttpRing.init(alloc, io, server.ring.fd, 1000);
 defer ring_b.deinit();
-try ring_b.registerWith(&fiber_shared);
 
-// HttpClient auto-uses RingB's built-in cache:
-var http_client = try HttpClient.init(alloc, &ring_b);
+// HttpClient auto-uses RingB's TinyCache — keep-alive, zero-config
+var http_client = try sws.HttpClient.init(alloc, &ring_b);
+try http_client.start(); // spawn dedicated ring thread
 defer http_client.deinit();
-
-// Set fiber_shared on server so IO thread harvests outbound CQEs
-server.fiber_shared = &fiber_shared;
 ```
 
 ### Handler — Synchronous (on IO thread)
@@ -699,10 +666,10 @@ const sws = @import("sws");
 // Ring B init (attached to server's Ring A io-wq, 1s cache TTL):
 var ring_b = try sws.HttpRing.init(allocator, io, server.ring.fd, 1000);
 defer ring_b.deinit();
-try ring_b.registerWith(&fiber_shared);
 
 // HttpClient — cache is automatically managed by RingB:
 var http_client = try sws.HttpClient.init(allocator, &ring_b);
+try http_client.start(); // spawn dedicated thread
 defer http_client.deinit();
 
 // Use from handler:
