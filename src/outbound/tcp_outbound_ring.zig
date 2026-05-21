@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 const StreamHandle = @import("../next/chunk_stream.zig").StreamHandle;
 const FiberShared = @import("../shared/fiber_shared.zig").FiberShared;
 const RingTrait = @import("../shared/fiber_shared.zig").RingTrait;
+const DnsResolver = @import("../dns/resolver.zig").DnsResolver;
 
 const TCP_READ_BUF = 262144; // 256KB
 const WRITE_TOKEN_FLAG: u64 = 1 << 62;
@@ -21,8 +22,8 @@ const WRITE_TOKEN_FLAG: u64 = 1 << 62;
 /// 用法:
 ///   var ring = try TcpOutboundRing.init(alloc, 256);
 ///   defer ring.deinit();
-///   // connect() requires an IP address; resolve hostnames before calling.
-///   const conn = try ring.connect("10.0.1.5", 3306);
+///   ring.setDns(&server.dns_resolver); // enable hostname → IP resolution
+///   const conn = try ring.connect("mysql.svc.cluster.local", 3306);
 ///   ring.attachStream(conn, stream);
 ///   // 主循环: while (running) { ring.tick(); }
 pub const TcpOutboundRing = struct {
@@ -31,6 +32,7 @@ pub const TcpOutboundRing = struct {
     ring: linux.IoUring,
     allocator: Allocator,
     conns: std.AutoHashMap(u64, *TcpConn),
+    dns: ?*DnsResolver = null,
     next_token: u64 = 1,
     cqes: [256]linux.io_uring_cqe = [_]linux.io_uring_cqe{std.mem.zeroes(linux.io_uring_cqe)} ** 256,
 
@@ -57,6 +59,10 @@ pub const TcpOutboundRing = struct {
             .ptr = self,
             .tickFn = tickCb,
         });
+    }
+
+    pub fn setDns(self: *Self, dns: *DnsResolver) void {
+        self.dns = dns;
     }
 
     fn tickCb(ptr: *anyopaque) void {
@@ -145,7 +151,19 @@ pub const TcpOutboundRing = struct {
         const fd = try linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
         errdefer _ = linux.close(fd);
 
-        const addr = try std.net.Address.parseIp(host, port);
+        const ip = if (std.net.Address.parseIp(host, port)) |parsed| blk: {
+            break :blk .{ .addr = parsed.any, .addrlen = parsed.getOsSockLen() };
+        } else |_| ip: {
+            const dns = self.dns orelse return error.DnsNotConfigured;
+            const ip_u32 = try dns.resolve(host);
+            const addr_in = linux.sockaddr.in{
+                .family = linux.AF.INET,
+                .port = @byteSwap(port),
+                .addr = ip_u32,
+                .zero = [_]u8{0} ** 8,
+            };
+            break :ip .{ .addr = @as(linux.sockaddr, @bitCast(addr_in)), .addrlen = @sizeOf(linux.sockaddr.in) };
+        };
 
         const token = self.next_token;
         self.next_token +%= 1;
@@ -166,8 +184,8 @@ pub const TcpOutboundRing = struct {
                 .wbuf_len = 0,
                 .written = 0,
             };
-            c.connect_addr = addr.any;
-            c._connect_addrlen = addr.getOsSockLen();
+            c.connect_addr = ip.addr;
+            c._connect_addrlen = ip.addrlen;
             break :init c;
         };
         // After the labeled block, the plain destroy errdefer is out of scope.
