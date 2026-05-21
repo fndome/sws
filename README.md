@@ -107,6 +107,31 @@ They communicate only through two unidirectional handoff queues.
 | "`ensureWriteBuf` races with `submitWrite`" | Both run on IO thread, sequentially |
 | "`ConnState` transitions need atomics" | IO thread only. State changes happen in event loop order |
 
+## Critical Usage Warning
+
+**Never use FUSE filesystem reads or writes within handler code running on
+sws.** The IO thread's io_uring event loop runs on a single thread. A blocking
+FUSE operation will stall the entire server, including all active connections.
+
+If your application needs to read from or write to remote storage (S3, OSS,
+MinIO, etc.), use **non-blocking network sockets directly at the io_uring
+level** — issue `OP_SEND` / `OP_RECV` (or the equivalent in your DB/HTTP
+client) targeting the remote API endpoint. Do not route I/O through FUSE
+even if the remote storage provides a FUSE mount option.
+
+The pattern is:
+
+```
+Application handler → OP_SEND/OP_RECV → remote S3/OSS API endpoint
+                      ↑ io_uring native, non-blocking
+```
+
+Not:
+
+```
+Application handler → FUSE read/write → blocks IO thread → server stalls
+```
+
 ## Requirements
 
 - Linux 5.1+ (io_uring)

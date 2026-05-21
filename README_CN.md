@@ -49,6 +49,30 @@ Handler 默认作为 **fiber 运行在 IO 线程上**。
 - Linux 5.1+（io_uring）
 - Zig 0.16.0
 
+## 重要使用警告
+
+**严禁在 sws handler 代码中通过 FUSE 文件系统进行读写操作。** IO 线程的
+io_uring 事件循环运行在单线程上，任何阻塞的 FUSE 操作都会导致整个服务器
+陷入停滞，波及所有活跃连接。
+
+如果你的应用需要读写远端存储（S3、OSS、MinIO 等），请在 **io_uring 层
+直接使用非阻塞网络 Socket**——发出 `OP_SEND` / `OP_RECV`（或对应 DB/HTTP
+客户端中的等价操作）直连远端 API 端点。即使远端存储提供了 FUSE 挂载选
+项，也不要将 I/O 绕经 FUSE。
+
+正确模式：
+
+```
+应用 handler → OP_SEND / OP_RECV → 远端 S3/OSS API 端点
+                 ↑ io_uring 原生非阻塞
+```
+
+错误模式：
+
+```
+应用 handler → FUSE read/write → 阻塞 IO 线程 → 服务器停滞
+```
+
 ## 快速开始
 
 ```bash
