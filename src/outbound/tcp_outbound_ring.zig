@@ -71,6 +71,8 @@ pub const TcpOutboundRing = struct {
                     self.closeConnFd(conn);
                     return;
                 }
+                const one: i32 = 1;
+                _ = linux.setsockopt(conn.fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, @ptrCast(&one), @sizeOf(i32));
                 conn.state = .idle;
                 self.submitReadyIo(conn);
             },
@@ -144,6 +146,8 @@ pub const TcpOutboundRing = struct {
                 .wbuf_len = 0,
                 .written = 0,
             };
+            c.connect_addr = addr.any;
+            c._connect_addrlen = addr.getOsSockLen();
             break :init c;
         };
         // After the labeled block, the plain destroy errdefer is out of scope.
@@ -153,7 +157,24 @@ pub const TcpOutboundRing = struct {
         try self.conns.put(token, conn);
         errdefer _ = self.conns.remove(token);
 
-        try self.ring.connect(token, fd, &addr.any, addr.getOsSockLen());
+        // CONNECT + LINK_TIMEOUT SQE chain with 5s timeout
+        {
+            const sqe = try self.ring.nop(token);
+            sqe.opcode = @enumFromInt(27); // IORING_OP_CONNECT
+            sqe.fd = fd;
+            sqe.addr = @intFromPtr(&conn.connect_addr);
+            sqe.off = conn._connect_addrlen;
+            sqe.flags |= linux.IOSQE_IO_LINK;
+
+            const tsqe = try self.ring.nop(0);
+            tsqe.opcode = @enumFromInt(15); // IORING_OP_LINK_TIMEOUT
+            conn.connect_timeout_ts = .{
+                .sec = @intCast(TcpConn.DEFAULT_CONNECT_TIMEOUT_MS / 1000),
+                .nsec = @intCast((TcpConn.DEFAULT_CONNECT_TIMEOUT_MS % 1000) * 1_000_000),
+            };
+            tsqe.addr = @intFromPtr(&conn.connect_timeout_ts);
+            tsqe.len = 1;
+        }
         _ = self.ring.submit() catch {};
         return conn;
     }
@@ -209,9 +230,14 @@ pub const TcpConn = struct {
     on_read: ?*const fn (ctx: ?*anyopaque, data: []const u8) void,
     on_read_ctx: ?*anyopaque,
     read_buf: []u8,
-    wbuf: [65536]u8, // 64KB, 对齐 read_buf
+    wbuf: [65536]u8, // 64KB
     wbuf_len: usize,
     written: usize,
+    connect_timeout_ts: linux.__kernel_timespec = .{ .sec = 0, .nsec = 0 },
+    connect_addr: linux.sockaddr = undefined,
+    _connect_addrlen: linux.socklen_t = @sizeOf(linux.sockaddr),
+
+    const DEFAULT_CONNECT_TIMEOUT_MS = 5000;
 
     pub const State = enum(u8) { connecting, idle, reading, writing, closing };
     const ReadyIo = enum { write, read, idle };
