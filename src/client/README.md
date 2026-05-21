@@ -47,7 +47,34 @@ A per-(host, port) keep-alive connection pool with:
 - Transparent acquire / release / evict lifecycle
 - No thread synchronization needed (single ring thread)
 
-### How they work together
+### Why a third-party io_uring HTTP client would not be enough
+
+Even if a standalone io_uring HTTP client existed for Zig, it would still
+leave a critical gap: **connection pooling is not a feature — it is a
+prerequisite for sustained performance under load.**
+
+Every cold HTTP request pays:
+
+- DNS resolution (~1-5ms async)
+- TCP three-way handshake (~100µs in DC, ~1ms cross-AZ)
+- TLS handshake (~1-5ms, not yet implemented in sws)
+
+For a single request this is negligible. For a handler that calls an
+external service on every WebSocket message at 20K msg/s, the cost of
+connecting + disconnecting on every call would saturate the outbound ring
+with SQE churn and inflate P99 latency by orders of magnitude.
+
+TinyCache absorbs this by keeping idle connections alive across requests.
+A handler that calls the same filter/db/auth service 100,000 times per
+second pays the connection cost once (on the first cold call), then
+reuses the connection for the remaining 99,999 calls. Without this pool,
+the io_uring ring would spend the majority of its SQE budget on
+`IORING_OP_CONNECT` instead of `IORING_OP_WRITE`.
+
+**An io_uring HTTP client without a connection pool is a benchmark toy.**
+It will post impressive single-connection throughput numbers and collapse
+under production fan-out. The combination of io_uring transport + per-host
+connection pool is what makes sws's outbound path viable at scale.
 
 ```
 handler (IO thread fiber)
