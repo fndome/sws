@@ -68,7 +68,7 @@ pub const TcpOutboundRing = struct {
         switch (conn.state) {
             .connecting => {
                 if (res < 0) {
-                    self.removeConn(conn);
+                    self.closeConnFd(conn);
                     return;
                 }
                 conn.state = .idle;
@@ -77,7 +77,7 @@ pub const TcpOutboundRing = struct {
             .reading => {
                 if (res <= 0) {
                     if (conn.stream) |s| _ = s.finish();
-                    self.removeConn(conn);
+                    self.closeConnFd(conn);
                     return;
                 }
                 const n = @as(usize, @intCast(res));
@@ -90,7 +90,7 @@ pub const TcpOutboundRing = struct {
             },
             .writing => {
                 if (res <= 0) {
-                    self.removeConn(conn);
+                    self.closeConnFd(conn);
                     return;
                 }
                 conn.written += @as(usize, @intCast(res));
@@ -100,7 +100,9 @@ pub const TcpOutboundRing = struct {
                     conn.state = .idle;
                     self.submitReadyIo(conn);
                 } else {
-                    conn.submitWrite(&self.ring) catch self.removeConn(conn);
+                    conn.submitWrite(&self.ring) catch {
+                        self.closeConnFd(conn);
+                    };
                 }
             },
             .idle, .closing => {},
@@ -110,11 +112,9 @@ pub const TcpOutboundRing = struct {
     fn submitReadyIo(self: *Self, conn: *TcpConn) void {
         switch (conn.nextReadyIo()) {
             .write => {
-                // 修改原因：write() 允许在 connecting/reading 状态先缓存数据；恢复可调度后必须先冲刷写缓冲，
-                // 否则 NATS SUB 这类 connect 后立即写入的请求会被后续 read 抢占并长期卡住。
-                conn.submitWrite(&self.ring) catch self.removeConn(conn);
+                conn.submitWrite(&self.ring) catch self.closeConnFd(conn);
             },
-            .read => conn.submitRead(&self.ring) catch self.removeConn(conn),
+            .read => conn.submitRead(&self.ring) catch self.closeConnFd(conn),
             .idle => {},
         }
     }
@@ -154,25 +154,44 @@ pub const TcpOutboundRing = struct {
 
     pub fn attachStream(self: *Self, conn: *TcpConn, stream: *StreamHandle) void {
         conn.stream = stream;
-        if (conn.state == .idle) {
-            conn.submitRead(&self.ring) catch self.removeConn(conn);
-        }
+        if (conn.state != .idle) return;
+        conn.submitRead(&self.ring) catch self.closeConnFd(conn);
     }
 
     pub fn write(self: *Self, conn: *TcpConn, data: []const u8) !void {
+        if (conn.state == .closing) return error.ConnClosed;
         if (conn.wbuf_len + data.len > conn.wbuf.len) {
             return error.WriteBufferFull;
         }
         @memcpy(conn.wbuf[conn.wbuf_len..][0..data.len], data);
         conn.wbuf_len += data.len;
         if (conn.state == .idle) {
-            conn.submitWrite(&self.ring) catch self.removeConn(conn);
+            conn.submitWrite(&self.ring) catch self.closeConnFd(conn);
         }
+    }
+
+    /// Close a connection explicitly. Safe to call multiple times.
+    /// Returns false if the connection was already removed from the map.
+    pub fn close(self: *Self, conn: *TcpConn) bool {
+        if (self.conns.getPtr(conn.token)) |_| {
+            self.removeConn(conn);
+            return true;
+        }
+        return false;
     }
 
     fn removeConn(self: *Self, conn: *TcpConn) void {
         _ = self.conns.remove(conn.token);
         conn.deinit(self.allocator);
+    }
+
+    fn closeConnFd(self: *Self, conn: *TcpConn) void {
+        _ = self;
+        if (conn.fd >= 0) {
+            _ = linux.close(conn.fd);
+            conn.fd = -1;
+        }
+        conn.state = .closing;
     }
 };
 
