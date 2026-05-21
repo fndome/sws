@@ -49,11 +49,18 @@ pub const SubmitQueueRegistry = struct {
 
     pub fn drain(self: *SubmitQueueRegistry, tasks: []Item) usize {
         var count: usize = 0;
-        for (self.queues.items) |q| {
-            while (q.pop()) |t| {
+        const num_queues = self.queues.items.len;
+        if (num_queues == 0) return 0;
+        var active = true;
+        while (active) {
+            active = false;
+            for (self.queues.items) |q| {
                 if (count >= tasks.len) return count;
-                tasks[count] = t;
-                count += 1;
+                if (q.pop()) |t| {
+                    tasks[count] = t;
+                    count += 1;
+                    active = true;
+                }
             }
         }
         return count;
