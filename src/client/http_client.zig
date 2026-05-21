@@ -376,15 +376,16 @@ pub const HttpClient = struct {
     allocator: Allocator,
     ring_b: *RingB,
     cache: *TinyCache,
-    pool_lock: std.Thread.Mutex,
+    pool_lock: std.Io.Mutex,
     req_pool_free: [REQUEST_POOL_SIZE]usize,
     req_pool_top: usize,
     req_pool_items: [REQUEST_POOL_SIZE]RequestContext,
     req_gen: [REQUEST_POOL_SIZE]u64,
     next_gen: u64,
     stop: bool,
+    thread: ?std.Thread = null,
 
-    const REQUEST_TIMEOUT_MS: i64 = 5000; // 5s
+    const REQUEST_TIMEOUT_MS: i64 = 5000;
 
     pub fn init(allocator: Allocator, ring_b: *RingB) !*HttpClient {
         const self = try allocator.create(HttpClient);
@@ -392,7 +393,7 @@ pub const HttpClient = struct {
             .allocator = allocator,
             .ring_b = ring_b,
             .cache = &ring_b.http_cache,
-            .pool_lock = .{},
+            .pool_lock = .init,
             .req_pool_free = initReqFreelist(),
             .req_pool_top = REQUEST_POOL_SIZE,
             .req_pool_items = undefined,
@@ -403,9 +404,34 @@ pub const HttpClient = struct {
         return self;
     }
 
+    fn lockPool(self: *HttpClient) void {
+        while (!self.pool_lock.tryLock()) std.Thread.yield() catch {};
+    }
+
+    fn unlockPool(self: *HttpClient) void {
+        self.pool_lock.state.store(.unlocked, .release);
+    }
+
+    pub fn start(self: *HttpClient) !void {
+        self.thread = try std.Thread.spawn(.{}, runClientThread, .{self});
+    }
+
+    fn runClientThread(self: *HttpClient) void {
+        while (!@atomicLoad(bool, &self.stop, .acquire)) {
+            self.ring_b.tick();
+            self.ring_b.invoke.drain(self.allocator);
+            _ = self.ring_b.ring.submit() catch {};
+            _ = self.ring_b.ring.submit_and_wait(1) catch continue;
+        }
+        self.ring_b.invoke.drain(self.allocator);
+    }
+
     pub fn deinit(self: *HttpClient) void {
         @atomicStore(bool, &self.stop, true, .release);
-        // 唤醒所有等待中的请求
+        if (self.thread) |t| {
+            t.join();
+            self.thread = null;
+        }
         for (self.req_pool_items[0..], 0..) |*ctx, i| {
             if (self.isBorrowed(i)) {
                 @atomicStore(bool, &ctx.done, true, .release);
@@ -415,8 +441,8 @@ pub const HttpClient = struct {
     }
 
     fn isBorrowed(self: *HttpClient, idx: usize) bool {
-        self.pool_lock.lock();
-        defer self.pool_lock.unlock();
+        self.lockPool();
+        defer self.unlockPool();
         return self.isBorrowedLocked(idx);
     }
 
@@ -428,8 +454,8 @@ pub const HttpClient = struct {
     }
 
     fn acquireReq(self: *HttpClient) ?*RequestContext {
-        self.pool_lock.lock();
-        defer self.pool_lock.unlock();
+        self.lockPool();
+        defer self.unlockPool();
         if (self.req_pool_top == 0) return null;
         self.req_pool_top -= 1;
         const idx = self.req_pool_free[self.req_pool_top];
@@ -460,8 +486,8 @@ pub const HttpClient = struct {
     }
 
     fn releaseReqInternal(self: *HttpClient, ctx: *RequestContext, deinit_response: bool) void {
-        self.pool_lock.lock();
-        defer self.pool_lock.unlock();
+        self.lockPool();
+        defer self.unlockPool();
         if (!self.isBorrowedLocked(ctx.pool_id)) return;
         if (deinit_response) ctx.response.deinit();
         ctx.cleanup();

@@ -83,7 +83,7 @@ pub const RingB = struct {
                 self.allocator.free(entry.key_ptr.*);
             }
         }
-        self.connecting.deinit(self.allocator);
+        self.connecting.deinit();
         self.invoke.drain(self.allocator);
         self.dns.deinit();
         self.registry.deinit();
