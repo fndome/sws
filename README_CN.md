@@ -33,7 +33,6 @@ IO 线程（io_uring Ring A + fiber）:
   ├── drainNextTasks（Next.go ringbuffer 任务）
   ├── drainDeferred / InvokeQueue → 发响应
   ├── drainTick（DNS tick + invoke.drain + tick_hooks）
-  ├── FiberShared.tick() — 收割出站 ring（Ring B/C/D...）
   └── TTL 增量扫描（StackPool 活跃表）
 
 Worker 线程池（可选，仅 CPU 密集任务）:
@@ -123,7 +122,6 @@ IO 线程（单线程）:
     → drainPendingResumes（fiber 恢复队列）
     → drainNextTasks（Next.go ringbuffer 任务）
     → drainTick（DNS tick + invoke.drain + tick_hooks）
-    → FiberShared.tick()（收割出站 Ring B/C/D）
     → TTL 扫描（StackPool 活跃表，增量滑窗）
     → 循环
 ```
@@ -158,56 +156,26 @@ line5（64B）：sentinel（0x53574153）+ workspace 联合体 — HTTP/WS/Compu
 
 **视图切换：** `line5.ws` 联合体根据连接状态在 `HttpWork`、`WsWork`、`ComputeWork` 之间切换——协议解析状态零堆分配。
 
-### Ring A + FiberShared — 多 ring 架构
+### Ring A + 独立线程出站
 
 **Ring A**（内置）：主服务器 `io_uring` ring — accept、连接读写、DNS、invoke。
-
-**出站 ring**（Ring B、Ring C...）：独立 io_uring ring 用于出站协议。注册到 `FiberShared`，IO 线程每轮事件循环遍历收割——零额外线程，零锁。
+**出站 ring**（Ring B, HTTP 客户端）：运行在独立 OS 线程上的 `io_uring` ring。IO 线程不受出站 I/O 影响。参见 [src/client/README.md](src/client/README.md) 了解为什么 HTTP 客户端内建在 sws 中。
 
 ```
 Ring A（主服务器，IO 线程）:
   ├── accept / read / write / close
   ├── io_registry（客户端回调注册表）
   ├── dns_resolver（异步 UDP DNS）
-  ├── rs.invoke（跨线程推送 → IO 线程回调）
-  └── FiberShared.tick()
-        ├── Ring B（HTTP 客户端）：ATTACH_WQ → 共享内核 io-wq
-        │     ├── DnsResolver
-        │     ├── IORegistry
-        │     ├── InvokeQueue
-        │     └── TinyCache
-        ├── Ring C（NATS 客户端 futures）
-        └── Ring D（MySQL 客户端 futures）
+  └── rs.invoke（跨线程推送 → IO 线程回调）
+
+Ring B（HTTP 客户端，独立线程）:
+  ├── ring.submit_and_wait(1)
+  ├── tick → dns.tick + invoke.drain + copy_cqes + dispatch
+  ├── IORegistry
+  ├── DnsResolver
+  ├── InvokeQueue
+  └── TinyCache（per-host keep-alive 连接池）
 ```
-
-#### FiberShared
-
-纯调度胶水层。持有所有出站 ring 的 tick 句柄。IO 线程每轮调 `tick()` 非阻塞收割所有已注册 ring 的 CQE。
-
-```zig
-const FiberShared = @import("sws").FiberShared;
-const RingTrait = @import("sws").RingTrait;
-
-var fiber_shared = try FiberShared.init(allocator);
-defer fiber_shared.deinit();
-
-// Ring B（HTTP 客户端）自行注册
-try ring_b.registerWith(&fiber_shared);
-
-// 任何新 ring 只需实现 RingTrait：
-//   ptr: *anyopaque  — 指向具体 ring 实例的指针
-//   tickFn: fn(*anyopaque) void  — dns.tick + invoke.drain + submit + copy_cqes + dispatch
-```
-
-#### RingTrait
-
-每个出站 ring 必须实现的契约：
-
-1. `dns.tick()` — 驱动 DNS 查询状态机
-2. `invoke.drain()` — 处理跨线程任务投递
-3. `ring.submit()` — 提交待处理 SQE
-4. `ring.copy_cqes()` — 非阻塞收割 CQE
-5. `registry.dispatch(ud, res)` — 分发 CQE 到已注册回调
 
 ### 初始化
 
@@ -225,26 +193,17 @@ var server = try AsyncServer.init(alloc, io, "0.0.0.0:9090", app_ctx, fiber_stac
 - `io_registry`: IORegistry — 出站客户端连接注册表
 - `dns_resolver`: DnsResolver — 异步 UDP DNS + TTL 缓存
 
-添加出站 ring（HTTP/NATS/MySQL）需要注入 `FiberShared`：
+添加内建 HTTP 客户端：
 
 ```zig
-const FiberShared = @import("sws").FiberShared;
-const RingB = @import("sws").HttpRing;
-const HttpClient = @import("sws").HttpClient;
-
-var fiber_shared = try FiberShared.init(alloc);
-defer fiber_shared.deinit();
-
-// Ring B 内建 1s TinyCache TTL：
-var ring_b = try RingB.init(alloc, io, server.ring.fd, 1000);
+// RingB 内建 1s TinyCache TTL：
+var ring_b = try sws.HttpRing.init(alloc, io, server.ring.fd, 1000);
 defer ring_b.deinit();
-try ring_b.registerWith(&fiber_shared);
 
-// HttpClient 自动使用 RingB 内建缓存：
-var http_client = try HttpClient.init(alloc, &ring_b);
+// HttpClient 自动使用 RingB 内建缓存 — keep-alive 零配置
+var http_client = try sws.HttpClient.init(alloc, &ring_b);
+try http_client.start(); // 启动独立 ring 线程
 defer http_client.deinit();
-
-server.fiber_shared = &fiber_shared;
 ```
 
 ### Handler — 同步（跑在 IO 线程）
@@ -675,10 +634,10 @@ HttpRing（独立 io_uring Ring B）内建 `TinyCache` 连接缓存。`ATTACH_WQ
 // Ring B init（1s 缓存 TTL）：
 const ring_b = try sws.HttpRing.init(allocator, io, server.ring.fd, 1000);
 defer ring_b.deinit();
-try ring_b.registerWith(&fiber_shared);
 
-// HttpClient 自动使用 RingB 内建缓存：
+// HttpClient 自动使用 RingB 内建缓存 — 独立线程驱动
 const client = try sws.HttpClient.init(allocator, &ring_b);
+try client.start();
 defer client.deinit();
 const resp = try client.get("http://api.example.com/data");
 defer resp.deinit();
