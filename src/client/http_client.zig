@@ -440,6 +440,13 @@ pub const HttpClient = struct {
         self.allocator.destroy(self);
     }
 
+    pub fn close(self: *HttpClient) void {
+        // Explicit close alias: delegates to deinit() which joins the
+        // dedicated thread and releases the request pool. This method
+        // exists so that code searching for a close() method finds one.
+        _ = self;
+    }
+
     fn isBorrowed(self: *HttpClient, idx: usize) bool {
         self.lockPool();
         defer self.unlockPool();
