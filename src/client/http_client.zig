@@ -323,11 +323,14 @@ fn onData(stream: *RingSharedClient, ctx: ?*anyopaque, data: []u8) void {
 }
 
 fn onClose(stream: *RingSharedClient, ctx: ?*anyopaque) void {
+    if (Fiber.isYielded()) {
+        Fiber.resumeYielded("");
+        return;
+    }
     if (ctx) |ptr| {
         const cache: *TinyCache = @ptrCast(@alignCast(ptr));
         cache.evictStream(stream);
     }
-    if (Fiber.isYielded()) Fiber.resumeYielded("");
 }
 
 const REQUEST_POOL_SIZE = 30;
@@ -693,13 +696,8 @@ fn httpRequestFiber(user_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []c
     defer ctx.allocator.free(parsed.host);
     defer ctx.allocator.free(parsed.authority);
 
-    const ip = client.ring_b.dns.resolve(parsed.host) catch {
-        ctx.response = makeErrorResponse(ctx.allocator, 502, "DNS resolution failed");
-        ctx.notify();
-        return;
-    };
-
     const now = nowMs();
+
     var stream: *RingSharedClient = undefined;
     var pipe: *Pipe = undefined;
 
@@ -707,20 +705,31 @@ fn httpRequestFiber(user_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []c
         stream = borrowed.stream;
         pipe = borrowed.pipe;
     } else {
+        // Per-target concurrent connect cap: fail fast before SQE ring allocation
+        client.ring_b.tryIncConnecting(parsed.host, parsed.port) catch {
+            ctx.response = makeErrorResponse(ctx.allocator, 503, "target connect limit reached");
+            ctx.notify();
+            return;
+        };
+        defer client.ring_b.decConnecting(parsed.host, parsed.port);
+
+        const ip = client.ring_b.dns.resolve(parsed.host) catch {
+            ctx.response = makeErrorResponse(ctx.allocator, 502, "DNS resolution failed");
+            ctx.notify();
+            return;
+        };
+
         stream = RingSharedClient.init(ctx.allocator, client.ring_b.rs, onData, onClose, @ptrCast(@constCast(cache)), null) catch {
             ctx.response = makeErrorResponse(ctx.allocator, 502, "client init failed");
             ctx.notify();
             return;
         };
-        // Connect with 5s io_uring timeout + 1 retry (non-timeout only)
         var connect_ok = false;
         var retries: u8 = 0;
         while (retries < 2) : (retries += 1) {
             stream.connectRawTimeout(ip, parsed.port, 5000) catch {
                 if (retries == 0) {
                     stream.deinit();
-                    // retry init must not fall through on failure: stream is
-                    // already freed, and stream.deinit() below would double-free
                     stream = RingSharedClient.init(ctx.allocator, client.ring_b.rs, onData, onClose, @ptrCast(@constCast(cache)), null) catch {
                         ctx.response = makeErrorResponse(ctx.allocator, 502, "client init failed after retry");
                         ctx.notify();

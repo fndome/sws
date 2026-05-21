@@ -129,10 +129,13 @@ pub const DnsResolver = struct {
         return error.DnsTxidExhausted;
     }
 
+    const NEGATIVE_TTL_SECS: u32 = 5;
+
     pub fn resolve(self: *DnsResolver, hostname: []const u8) !u32 {
         const now = self.nowMs();
 
         if (self.cache.get(hostname, now)) |cached| {
+            if (cached.negative) return error.DomainNotFound;
             return cached.addrs[0];
         }
 
@@ -147,16 +150,21 @@ pub const DnsResolver = struct {
             .retries = 0,
             .slot = undefined,
         };
+
         try self.pending.put(txid, pq);
 
         Fiber.dnsYield(&self.pending.getPtr(txid).?.slot);
 
-        const result = self.results.fetchRemove(txid) orelse return error.DnsTimeout;
+        const result = self.results.fetchRemove(txid) orelse {
+            self.cache.put(hostname, &.{}, NEGATIVE_TTL_SECS, self.nowMs(), true) catch {};
+            return error.DnsTimeout;
+        };
 
         if (result.value.len > 0) {
             try self.cache.put(hostname, result.value.addrs[0..result.value.len], result.value.ttl, self.nowMs(), false);
             return result.value.addrs[0];
         }
+        self.cache.put(hostname, &.{}, NEGATIVE_TTL_SECS, self.nowMs(), true) catch {};
         return error.DomainNotFound;
     }
 

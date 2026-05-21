@@ -38,6 +38,11 @@ pub const RingB = struct {
     /// 内建出站连接缓存：同 host:port 在 TTL 内复用 TCP 连接。
     /// RingB.tick() 自动淘汰过期条目，用户无需干预。
     http_cache: TinyCache,
+    /// 同 (host, port) 并发建连计数，防止死目标扇出耗尽 SQE ring。
+    /// 键格式: "host:port"，值为当前正在建连的 fiber 数量。
+    connecting: std.StringHashMap(u32),
+    /// 单目标最大并发建连数
+    pub const MAX_CONCURRENT_CONNECTS: u32 = 4;
 
     pub fn init(allocator: Allocator, io: std.Io, attach_ring_fd: i32, cache_ttl_ms: i64) !RingB {
         const ns_ip = helpers.readResolvConfNameserver() catch @as(u32, 0x08080808);
@@ -67,11 +72,13 @@ pub const RingB = struct {
             .dns = dns,
             .invoke = .{},
             .http_cache = TinyCache.init(allocator, cache_ttl_ms),
+            .connecting = std.StringHashMap(u32).init(allocator),
         };
     }
 
     pub fn deinit(self: *RingB) void {
         self.http_cache.deinit();
+        self.connecting.deinit(self.allocator);
         self.invoke.drain(self.allocator);
         self.dns.deinit();
         self.registry.deinit();
@@ -108,6 +115,42 @@ pub const RingB = struct {
             if ((ud & CLIENT_USER_DATA_FLAG) != 0) {
                 self.registry.dispatch(ud, cqe.res);
             }
+        }
+    }
+
+    pub fn incConnecting(self: *RingB, host: []const u8, port: u16) !u32 {
+        const key = try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ host, port });
+        const entry = try self.connecting.getOrPut(key);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = 1;
+        } else {
+            entry.value_ptr.* += 1;
+        }
+        return entry.value_ptr.*;
+    }
+
+    pub fn decConnecting(self: *RingB, host: []const u8, port: u16) void {
+        const key = std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ host, port }) catch return;
+        defer self.allocator.free(key);
+        if (self.connecting.getPtr(key)) |v| {
+            if (v.* > 1) {
+                v.* -= 1;
+            } else {
+                _ = self.connecting.remove(key);
+            }
+        }
+    }
+
+    pub fn tryIncConnecting(self: *RingB, host: []const u8, port: u16) !void {
+        const key = try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ host, port });
+        const entry = try self.connecting.getOrPut(key);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = 1;
+        } else {
+            if (entry.value_ptr.* >= MAX_CONCURRENT_CONNECTS) {
+                return error.TargetConnectLimitReached;
+            }
+            entry.value_ptr.* += 1;
         }
     }
 };

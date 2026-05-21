@@ -38,13 +38,16 @@ pub const DnsCache = struct {
         self.entries.deinit(self.allocator);
     }
 
-    pub fn get(self: *DnsCache, name: []const u8, now_ms: i64) ?struct { addrs: []const u32, ttl: u32 } {
+    pub fn get(self: *DnsCache, name: []const u8, now_ms: i64) ?struct { addrs: []const u32, ttl: u32, negative: bool } {
         const hash = hashName(name);
         for (self.entries.items) |*entry| {
             if (entry.key_hash == hash and namesEqual(entry.name, name)) {
                 if (entry.expires_at_ms <= now_ms) return null;
-                if (entry.negative) return null;
-                return .{ .addrs = entry.addrs[0..entry.addr_count], .ttl = @intCast(@max(entry.expires_at_ms - now_ms, 1000) / 1000) };
+                return .{
+                    .addrs = entry.addrs[0..entry.addr_count],
+                    .ttl = @intCast(@max(entry.expires_at_ms - now_ms, 1000) / 1000),
+                    .negative = entry.negative,
+                };
             }
         }
         return null;

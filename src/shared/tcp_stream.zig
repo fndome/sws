@@ -167,9 +167,8 @@ pub const RingSharedClient = struct {
         sqe.off = self._connect_addrlen;
         if (timeout_ms > 0) {
             const tsqe = ring.nop(0) catch {
-                // 修改原因：超时 SQE 不足时前面的 CONNECT SQE 已占位，至少要提交 CONNECT，不能提前 return 造成无完成事件。
                 _ = ring.submit() catch {};
-                return;
+                return error.ConnectSubmitQueueFull;
             };
             sqe.flags |= linux.IOSQE_IO_LINK; // link LINK_TIMEOUT next
             tsqe.opcode = @enumFromInt(15); // IORING_OP_LINK_TIMEOUT
