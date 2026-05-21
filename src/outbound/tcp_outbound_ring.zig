@@ -7,6 +7,7 @@ const FiberShared = @import("../shared/fiber_shared.zig").FiberShared;
 const RingTrait = @import("../shared/fiber_shared.zig").RingTrait;
 
 const TCP_READ_BUF = 262144; // 256KB
+const WRITE_TOKEN_FLAG: u64 = 1 << 62;
 
 /// ── TcpOutboundRing: 通用 TCP 出站 io_uring 通道 ──────────
 ///
@@ -76,9 +77,30 @@ pub const TcpOutboundRing = struct {
     }
 
     fn processCqe(self: *Self, cqe: *const linux.io_uring_cqe) void {
-        const token = cqe.user_data;
-        const conn = self.conns.getPtr(token) orelse return;
+        const user_data = cqe.user_data;
         const res = cqe.res;
+
+        if (user_data & WRITE_TOKEN_FLAG != 0) {
+            const token = user_data & ~WRITE_TOKEN_FLAG;
+            const conn = self.conns.getPtr(token) orelse return;
+            if (res <= 0) {
+                self.closeConnFd(conn);
+                return;
+            }
+            conn.written += @as(usize, @intCast(res));
+            if (conn.written >= conn.wbuf_len) {
+                conn.wbuf_len = 0;
+                conn.written = 0;
+                conn.write_in_flight = false;
+                self.submitReadyIo(conn);
+            } else {
+                conn.submitWrite(&self.ring) catch self.closeConnFd(conn);
+            }
+            return;
+        }
+
+        const token = user_data;
+        const conn = self.conns.getPtr(token) orelse return;
 
         switch (conn.state) {
             .connecting => {
@@ -91,7 +113,7 @@ pub const TcpOutboundRing = struct {
                 conn.state = .idle;
                 self.submitReadyIo(conn);
             },
-            .reading => {
+            .reading, .idle => {
                 if (res <= 0) {
                     if (conn.stream) |s| _ = s.finish();
                     self.closeConnFd(conn);
@@ -105,24 +127,7 @@ pub const TcpOutboundRing = struct {
                 }
                 self.submitReadyIo(conn);
             },
-            .writing => {
-                if (res <= 0) {
-                    self.closeConnFd(conn);
-                    return;
-                }
-                conn.written += @as(usize, @intCast(res));
-                if (conn.written >= conn.wbuf_len) {
-                    conn.wbuf_len = 0;
-                    conn.written = 0;
-                    conn.state = .idle;
-                    self.submitReadyIo(conn);
-                } else {
-                    conn.submitWrite(&self.ring) catch {
-                        self.closeConnFd(conn);
-                    };
-                }
-            },
-            .idle, .closing => {},
+            .closing => {},
         }
     }
 
@@ -195,7 +200,7 @@ pub const TcpOutboundRing = struct {
 
     pub fn attachStream(self: *Self, conn: *TcpConn, stream: *StreamHandle) void {
         conn.stream = stream;
-        if (conn.state != .idle) return;
+        if (conn.state != .idle and conn.state != .reading) return;
         conn.submitRead(&self.ring) catch self.closeConnFd(conn);
     }
 
@@ -206,11 +211,9 @@ pub const TcpOutboundRing = struct {
         }
         @memcpy(conn.wbuf[conn.wbuf_len..][0..data.len], data);
         conn.wbuf_len += data.len;
-        if (conn.state == .idle) {
+        if (!conn.write_in_flight and (conn.state == .idle or conn.state == .reading)) {
             conn.submitWrite(&self.ring) catch self.closeConnFd(conn);
         }
-        // When in .reading or .connecting, the write is queued and will be
-        // flushed by submitReadyIo() on the next state transition.
     }
 
     /// Close a connection explicitly. Safe to call multiple times.
@@ -243,6 +246,7 @@ pub const TcpConn = struct {
     fd: i32,
     token: u64,
     state: State,
+    write_in_flight: bool = false,
     stream: ?*StreamHandle,
     on_read: ?*const fn (ctx: ?*anyopaque, data: []const u8) void,
     on_read_ctx: ?*anyopaque,
@@ -258,12 +262,12 @@ pub const TcpConn = struct {
 
     const DEFAULT_CONNECT_TIMEOUT_MS = 5000;
 
-    pub const State = enum(u8) { connecting, idle, reading, writing, closing };
+    pub const State = enum(u8) { connecting, idle, reading, closing };
     const ReadyIo = enum { write, read, idle };
 
     fn nextReadyIo(self: *const TcpConn) ReadyIo {
-        if (self.written < self.wbuf_len) return .write;
-        if (self.stream != null or self.on_read != null) return .read;
+        if (self.wbuf_len > 0 and self.written < self.wbuf_len and !self.write_in_flight) return .write;
+        if ((self.stream != null or self.on_read != null) and (self.state == .idle or self.state == .reading)) return .read;
         return .idle;
     }
 
@@ -271,16 +275,14 @@ pub const TcpConn = struct {
     // Calling ring.submit() per I/O would trigger io_uring_enter on every
     // read/write, wasting syscalls when multiple connections share the ring.
     fn submitRead(self: *TcpConn, ring: *linux.IoUring) !void {
-        // 修复：移除每次 I/O 后的独立 ring.submit()，由 tick() 统一提交以减少 io_uring_enter 调用。
         self.state = .reading;
         _ = try ring.read(self.token, self.fd, .{ .buffer = self.read_buf }, 0);
     }
 
     fn submitWrite(self: *TcpConn, ring: *linux.IoUring) !void {
-        // 修复：同上，提交由 tick() 统一处理。
-        self.state = .writing;
+        self.write_in_flight = true;
         const pending = self.wbuf[self.written..self.wbuf_len];
-        _ = try ring.write(self.token, self.fd, pending, 0);
+        _ = try ring.write(self.token | WRITE_TOKEN_FLAG, self.fd, pending, 0);
     }
 
     fn deinit(self: *TcpConn, allocator: Allocator) void {
