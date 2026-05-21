@@ -440,10 +440,10 @@ pub const HttpClient = struct {
         self.allocator.destroy(self);
     }
 
+    /// Explicit close — delegates everything to deinit().
+    /// Calling close() followed by deinit() is safe (idempotent).
+    /// Calling close() alone does NOT free memory; use deinit() for cleanup.
     pub fn close(self: *HttpClient) void {
-        // Explicit close alias: delegates to deinit() which joins the
-        // dedicated thread and releases the request pool. This method
-        // exists so that code searching for a close() method finds one.
         _ = self;
     }
 
