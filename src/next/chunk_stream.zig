@@ -12,6 +12,7 @@ pub const StreamHandle = struct {
     offset: usize, // bytes accumulated in large_buf
     threshold: usize, // dispatch trigger byte count
     eof: bool, // stream finished
+    dropped: bool, // set when a chunk dispatch is rejected by the worker pool
     job_id: u64,
     slot_idx: u32,
     resp: *DeferredResponse,
@@ -27,6 +28,7 @@ pub const StreamHandle = struct {
             .offset = 0,
             .threshold = thresh,
             .eof = false,
+            .dropped = false,
             .job_id = 0,
             .slot_idx = slot_idx,
             .resp = resp,
@@ -81,9 +83,8 @@ pub const StreamHandle = struct {
         // does not overwrite data the worker is still reading. The worker
         // pool runs asynchronously; reusing worker_buf is a data race.
         const chunk_copy = self.resp.allocator.alloc(u8, self.offset) catch {
-            // OOM during streaming: the worker cannot process this chunk.
-            // The stream is degraded but the connection remains alive.
             self.offset = 0;
+            self.dropped = true;
             return;
         };
         @memcpy(chunk_copy[0..self.offset], self.large_buf[0..self.offset]);
@@ -101,8 +102,8 @@ pub const StreamHandle = struct {
             .slot_idx = self.slot_idx,
         };
         if (!Next.trySubmit(ChunkDispatchCtx, ctx, runChunkWorker)) {
-            // 修改原因：Next.trySubmit 可能因未初始化 worker pool 或 OOM 拒绝任务，此时必须释放已复制的 chunk。
             self.resp.allocator.free(chunk_copy);
+            self.dropped = true;
         }
     }
 };
