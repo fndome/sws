@@ -18,7 +18,8 @@ const TCP_READ_BUF = 262144; // 256KB
 /// 用法:
 ///   var ring = try TcpOutboundRing.init(alloc, 256);
 ///   defer ring.deinit();
-///   const conn = try ring.connect("127.0.0.1", 3306);
+///   // connect() requires an IP address; resolve hostnames before calling.
+///   const conn = try ring.connect("10.0.1.5", 3306);
 ///   ring.attachStream(conn, stream);
 ///   // 主循环: while (running) { ring.tick(); }
 pub const TcpOutboundRing = struct {
@@ -125,8 +126,7 @@ pub const TcpOutboundRing = struct {
         const fd = try linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
         errdefer _ = linux.close(fd);
 
-        const addr = try std.net.Address.parseIp(host, port) catch
-            try std.net.Address.resolveIp(host, port, .ip4);
+        const addr = try std.net.Address.parseIp(host, port);
 
         const token = self.next_token;
         self.next_token += 1;
