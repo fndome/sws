@@ -35,7 +35,6 @@ const Opcode = @import("../ws/types.zig").Opcode;
 
 const DnsResolver = @import("../dns/resolver.zig").DnsResolver;
 const RingShared = @import("../shared/ring_shared.zig").RingShared;
-const FiberShared = @import("../shared/fiber_shared.zig").FiberShared;
 const StackPool = @import("../stack_pool.zig").StackPool;
 const StackSlot = @import("../stack_pool.zig").StackSlot;
 const LargeBufferPool = @import("../shared/large_buffer_pool.zig").LargeBufferPool;
@@ -132,10 +131,6 @@ pub const AsyncServer = struct {
 
     /// DNS 解析器 (io_uring 异步 UDP DNS)
     dns_resolver: DnsResolver,
-
-    /// 出站协议统一调度胶水（Ring B / Ring C / ... 注册于此）。
-    /// IO 线程每轮 tick 遍历所有出站 ring 收割 CQE，零额外线程。
-    fiber_shared: ?*FiberShared = null,
 
     /// HTTP 请求 fiber 执行器
     next: ?Next = null,

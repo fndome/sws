@@ -105,7 +105,6 @@ pub fn run(self: *AsyncServer) !void {
             };
 
             drainTick(self);
-            if (self.fiber_shared) |fs| fs.tick();
             ttlScanTick(self);
             continue;
         }
@@ -125,7 +124,6 @@ pub fn run(self: *AsyncServer) !void {
 
         drainNextTasks(self);
         drainTick(self);
-        if (self.fiber_shared) |fs| fs.tick();
         ttlScanTick(self);
 
         _ = self.ring.submit_and_wait(1) catch |err| {
@@ -142,7 +140,6 @@ pub fn run(self: *AsyncServer) !void {
         };
         dispatchCqes(self, &cqes, n2);
         drainPendingResumes(self);
-        if (self.fiber_shared) |fs| fs.tick();
         ttlScanTick(self);
     }
 }

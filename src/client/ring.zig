@@ -7,8 +7,6 @@ const RingShared = @import("../shared/ring_shared.zig").RingShared;
 const InvokeQueue = @import("../shared/io_invoke.zig").InvokeQueue;
 const DnsResolver = @import("../dns/resolver.zig").DnsResolver;
 const CLIENT_USER_DATA_FLAG = @import("../shared/io_registry.zig").CLIENT_USER_DATA_FLAG;
-const FiberShared = @import("../shared/fiber_shared.zig").FiberShared;
-const RingTrait = @import("../shared/fiber_shared.zig").RingTrait;
 const TinyCache = @import("tiny_cache.zig").TinyCache;
 const helpers = @import("../http/http_helpers.zig");
 
@@ -18,7 +16,8 @@ const MAX_CQES_TICK = 64;
 ///
 /// 出站 HTTP 客户端 IO 归口。
 /// 持有 ring + RingShared + IORegistry + DnsResolver + InvokeQueue + TinyCache。
-/// 通过 registerWith() 注入 FiberShared 调度胶水，零额外线程。
+///
+/// 调用方应自行驱动 RingB.tick()（可在独立线程中轮询）。
 ///
 /// TinyCache 内建在 RingB 中，由 RingB.tick() 每轮自动淘汰过期连接，
 /// 用户无需手动管理缓存生命周期。
@@ -89,19 +88,6 @@ pub const RingB = struct {
         self.dns.deinit();
         self.registry.deinit();
         self.ring.deinit();
-    }
-
-    /// 注入 FiberShared 调度胶水
-    pub fn registerWith(self: *RingB, fs: *FiberShared) !void {
-        try fs.register(RingTrait{
-            .ptr = self,
-            .tickFn = tickCb,
-        });
-    }
-
-    fn tickCb(ptr: *anyopaque) void {
-        const self: *RingB = @ptrCast(@alignCast(ptr));
-        self.tick();
     }
 
     /// 非阻塞收割 Ring B 的 CQE + 淘汰过期缓存连接。
