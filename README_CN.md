@@ -51,27 +51,41 @@ Handler 默认作为 **fiber 运行在 IO 线程上**。
 
 ## 重要使用警告
 
-**严禁在 sws handler 代码中通过 FUSE 文件系统进行读写操作。** IO 线程的
-io_uring 事件循环运行在单线程上，任何阻塞的 FUSE 操作都会导致整个服务器
-陷入停滞，波及所有活跃连接。
+**严禁在 sws handler 代码中通过内核块设备层进行文件读写。** IO 线程的
+io_uring 事件循环运行在单线程上，任何阻塞调用线程的操作都会导致整个服务
+器陷入停滞，波及所有活跃连接。
 
-如果你的应用需要读写远端存储（S3、OSS、MinIO 等），请在 **io_uring 层
-直接使用非阻塞网络 Socket**——发出 `OP_SEND` / `OP_RECV`（或对应 DB/HTTP
-客户端中的等价操作）直连远端 API 端点。即使远端存储提供了 FUSE 挂载选
-项，也不要将 I/O 绕经 FUSE。
+### 禁止通过文件 I/O 使用的存储后端
 
-正确模式：
+以下后端会经过内核块设备层，即使挂载为本地路径也会阻塞 IO 线程：
+
+- **FUSE** — 任何通过 FUSE 挂载的文件系统（s3fs、gcsfuse 等）
+- **Longhorn v1** — 内核 iSCSI initiator → engine → replica，同步复制
+  quorum 在内核 I/O 路径内等待
+- **Ceph RBD（内核模式）** — 内核块设备等待 OSD 确认
+- 任何通过标准内核文件系统栈挂载的网络块设备（NFS、iSCSI、同步模式 DRBD）
+
+### 可安全使用的存储后端
+
+- **local_pv** — 直接挂载的 NVMe/SSD，页缓存写入延迟极低
+- **基于 SPDK 的用户态存储** — 完全绕过内核块设备层的存储引擎，使用轮询
+  模式 NVMe 驱动与 vhost-user 共享内存。例如：**OpenEBS Mayastor**、
+  Longhorn v2（SPDK 后端）。
+
+SPDK 存储之所以安全，是因为 I/O 路径全程不进入内核——数据通过 DMA 直接从
+NVMe 传输到用户态环形缓冲区，轮询模式驱动永不阻塞调用线程。
+
+### 远端对象存储
+
+请使用 **io_uring 层面非阻塞网络 Socket**，直接向远端 API 端点发出
+`OP_SEND` / `OP_RECV`：
 
 ```
-应用 handler → OP_SEND / OP_RECV → 远端 S3/OSS API 端点
-                 ↑ io_uring 原生非阻塞
+handler → OP_SEND / OP_RECV → S3/OSS/MinIO HTTP API
+           ↑ io_uring 原生非阻塞
 ```
 
-错误模式：
-
-```
-应用 handler → FUSE read/write → 阻塞 IO 线程 → 服务器停滞
-```
+不要通过 FUSE 挂载 S3/OSS 然后进行文件读写。
 
 ## 快速开始
 

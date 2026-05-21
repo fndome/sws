@@ -109,28 +109,45 @@ They communicate only through two unidirectional handoff queues.
 
 ## Critical Usage Warning
 
-**Never use FUSE filesystem reads or writes within handler code running on
-sws.** The IO thread's io_uring event loop runs on a single thread. A blocking
-FUSE operation will stall the entire server, including all active connections.
+**Never perform filesystem reads or writes through the kernel block layer in
+handler code.** The IO thread's io_uring event loop runs on a single thread.
+Any operation that blocks the calling thread will stall the entire server,
+including all active connections.
 
-If your application needs to read from or write to remote storage (S3, OSS,
-MinIO, etc.), use **non-blocking network sockets directly at the io_uring
-level** — issue `OP_SEND` / `OP_RECV` (or the equivalent in your DB/HTTP
-client) targeting the remote API endpoint. Do not route I/O through FUSE
-even if the remote storage provides a FUSE mount option.
+### Storage Backends You Must NOT Use via File I/O
 
-The pattern is:
+These backends route I/O through the kernel block layer and will block the IO
+thread, even when mounted as a local path:
+
+- **FUSE** — any filesystem mounted via FUSE (s3fs, gcsfuse, etc.)
+- **Longhorn v1** — kernel iSCSI initiator → engine → replica; synchronous
+  replication quorum inside the kernel I/O path
+- **Ceph RBD (kernel)** — kernel block device waits for OSD acknowledgements
+- Any network-attached block device mounted through the standard kernel
+  filesystem stack (NFS, iSCSI, DRBD with synchronous mode)
+
+### Storage Backends That Are Safe
+
+- **local_pv** — directly attached NVMe/SSD with low-latency page cache writes
+- **SPDK-based user-space storage** — storage engines that bypass the kernel
+  block layer entirely using polled-mode NVMe drivers and vhost-user shared
+  memory. Examples: **OpenEBS Mayastor**, Longhorn v2 (SPDK backend).
+
+SPDK storage is safe because the I/O path never enters the kernel — data moves
+DMA-direct from NVMe to user-space ring buffers, and the polled-mode driver
+never blocks the calling thread.
+
+### For Remote Object Storage
+
+Use **non-blocking network sockets at the io_uring level** — issue `OP_SEND` /
+`OP_RECV` to the remote API endpoint directly:
 
 ```
-Application handler → OP_SEND/OP_RECV → remote S3/OSS API endpoint
-                      ↑ io_uring native, non-blocking
+handler → OP_SEND/OP_RECV → S3/OSS/MinIO HTTP API
+           ↑ io_uring native, non-blocking
 ```
 
-Not:
-
-```
-Application handler → FUSE read/write → blocks IO thread → server stalls
-```
+Do NOT mount S3/OSS via FUSE and read/write files.
 
 ## Requirements
 
