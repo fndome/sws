@@ -102,9 +102,7 @@ pub fn deferToQueue(
             }
         }.done,
     })) {
-        ctx.allocator.destroy(w);
-        ctx.allocator.destroy(user);
-        ctx.allocator.destroy(resp);
+        ctx.deferred = false;
         return error.QueueFull;
     }
 }
