@@ -34,5 +34,9 @@ pub fn findUsers(allocator: std.mem.Allocator, ctx: *Context) anyerror!void {
     resp.* = .{ .server = s, .conn_id = ctx.conn_id, .allocator = allocator };
 
     ctx.deferred = true;
-    Next.go(Ctx, .{ .allocator = allocator, .resp = resp, .sql = "SELECT * FROM users" }, exec);
+    if (!Next.go(Ctx, .{ .allocator = allocator, .resp = resp, .sql = "SELECT * FROM users" }, exec)) {
+        ctx.deferred = false;
+        allocator.destroy(resp);
+        return error.QueueFull;
+    }
 }

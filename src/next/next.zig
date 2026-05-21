@@ -379,12 +379,12 @@ pub const Next = struct {
         comptime T: type,
         ctx: T,
         comptime execFn: fn (*T, *const fn (?*anyopaque, []const u8) void) void,
-    ) void {
+    ) bool {
         const n = @atomicLoad(?*Next, &default_next, .acquire) orelse {
             std.log.err("Next.go: no default Next instance set", .{});
-            return;
+            return false;
         };
-        _ = n.push(T, ctx, execFn, n.default_stack_size);
+        return n.push(T, ctx, execFn, n.default_stack_size);
     }
 
     pub fn goWithStackConfigurable(
@@ -392,12 +392,12 @@ pub const Next = struct {
         ctx: T,
         comptime execFn: fn (*T, *const fn (?*anyopaque, []const u8) void) void,
         stack_size: u32,
-    ) void {
+    ) bool {
         const n = @atomicLoad(?*Next, &default_next, .acquire) orelse {
             std.log.err("Next.goWithStackConfigurable: no default Next instance set", .{});
-            return;
+            return false;
         };
-        _ = n.push(T, ctx, execFn, stack_size);
+        return n.push(T, ctx, execFn, stack_size);
     }
 
     pub fn push(
@@ -525,7 +525,7 @@ pub const Next = struct {
 
         http_ctx.deferred = true;
 
-        go(
+        if (!go(
             ChainWrap(T),
             w.*,
             struct {
@@ -535,13 +535,11 @@ pub const Next = struct {
                 ) void {
                     execGo(&wrap.user, struct {
                         fn done(caller_ctx: ?*anyopaque, data: []const u8) void {
-                            // 通过 execGo 传入的 user 指针恢复 ChainWrap
                             const uptr: *T = @ptrCast(@alignCast(caller_ctx.?));
                             const w2: *ChainWrap(T) = @fieldParentPtr("user", uptr);
                             const alloc2 = w2.chain.allocator;
                             const resp2 = w2.chain.resp;
 
-                            // Step 2: worker 池
                             const sc = alloc2.create(ChainSubmitCtx(T)) catch {
                                 resp2.json(500, "{\"error\":\"OOM\"}");
                                 alloc2.destroy(resp2);
@@ -571,7 +569,10 @@ pub const Next = struct {
                     _ = complete;
                 }
             }.run,
-        );
+        )) {
+            http_ctx.deferred = false;
+            return error.QueueFull;
+        }
         alloc.destroy(w);
     }
 
