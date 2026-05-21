@@ -47,6 +47,7 @@ const ws_handler = @import("ws_handler.zig");
 const event_loop = @import("event_loop.zig");
 const http_response = @import("http_response.zig");
 const tcp_accept = @import("tcp_accept.zig");
+const AsyncLogger = @import("../async_logger.zig").AsyncLogger;
 const connection_mgr = @import("connection_mgr.zig");
 const http_routing = @import("http_routing.zig");
 const tcp_read = @import("tcp_read.zig");
@@ -100,6 +101,10 @@ pub const AsyncServer = struct {
     middlewares: MiddlewareStore,
     respond_middlewares: MiddlewareStore,
     handlers: std.StringHashMap(Handler),
+
+    /// Async logger: offloads stderr writes to a dedicated thread so IO thread
+    /// never blocks on log syscalls.
+    logger: ?*AsyncLogger = null,
 
     timeout_user_data: u64 = 0,
     timeout_ts: linux.kernel_timespec = .{ .sec = 1, .nsec = 0 },
@@ -167,6 +172,7 @@ pub const AsyncServer = struct {
         write_timeout_ms: u64 = constants.WRITE_TIMEOUT_MS,
         fiber_stack_size_kb: u16 = 256,
         io_cpu: ?u6 = null,
+        log_cpu: ?u6 = null,
     };
 
     pub const ConfigKey = enum {
@@ -183,6 +189,7 @@ pub const AsyncServer = struct {
         idle_timeout_ms,
         write_timeout_ms,
         io_cpu,
+        log_cpu,
     };
 
     pub fn config(self: *Self, key: ConfigKey, value: i32) void {
@@ -200,6 +207,7 @@ pub const AsyncServer = struct {
             .idle_timeout_ms => self.cfg.idle_timeout_ms = @intCast(value),
             .write_timeout_ms => self.cfg.write_timeout_ms = @intCast(value),
             .io_cpu => self.cfg.io_cpu = if (value < 0) null else @intCast(value),
+            .log_cpu => self.cfg.log_cpu = if (value < 0) null else @intCast(value),
         }
     }
 
@@ -327,6 +335,9 @@ pub const AsyncServer = struct {
         try server.http_ctx_pool.addCapacity(allocator, 64);
         try server.ws_ctx_pool.addCapacity(allocator, 64);
 
+        server.logger = try AsyncLogger.init(allocator, server.cfg.log_cpu);
+        errdefer if (server.logger) |l| l.deinit();
+
         return server;
     }
 
@@ -401,6 +412,7 @@ pub const AsyncServer = struct {
         self.ws_ctx_pool.deinit(self.allocator);
         self.allocator.free(self.shared_fiber_stack);
         self.pending_writes.deinit(self.allocator);
+        if (self.logger) |l| l.deinit();
         self.cfg = undefined;
     }
 

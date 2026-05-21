@@ -163,7 +163,7 @@ pub fn readResolvConfNameserver() !u32 {
 }
 
 pub fn logErr(comptime format: []const u8, args: anytype) void {
-    std.debug.print("[ERROR] " ++ format ++ "\n", args);
+    @import("../async_logger.zig").logErr(format, args);
 }
 
 test "isKeepAliveConnection uses request line and exact Connection tokens" {

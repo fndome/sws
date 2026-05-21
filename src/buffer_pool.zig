@@ -1,6 +1,8 @@
 const std = @import("std");
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
+const logErr = @import("async_logger.zig").logErr;
+const logWarn = @import("async_logger.zig").logWarn;
 const BUFFER_SIZE = @import("constants.zig").BUFFER_SIZE;
 const READ_BUF_GROUP_ID = @import("constants.zig").READ_BUF_GROUP_ID;
 const TIER_SIZES = @import("constants.zig").TIER_SIZES;
@@ -79,7 +81,7 @@ pub const BufferPool = struct {
             if (queued == bid) return;
         }
         self.replenish_queue.append(self.allocator, bid) catch |err| {
-            std.log.err("markReplenish: failed to append bid={d}: {s}", .{ bid, @errorName(err) });
+            logErr("markReplenish: failed to append bid={d}: {s}", .{ bid, @errorName(err) });
         };
     }
 
@@ -92,7 +94,7 @@ pub const BufferPool = struct {
             const ptr = self.slab.ptr + @as(usize, bid) * BUFFER_SIZE;
             _ = ring.provide_buffers(0, ptr, BUFFER_SIZE, 1, READ_BUF_GROUP_ID, bid) catch |err| {
                 // Ring full — trim processed items, keep remaining for next flush
-                std.log.warn("flushReplenish: provide_buffers failed at bid={d}: {s}, {d} remaining", .{ bid, @errorName(err), self.replenish_queue.items.len - i });
+                logWarn("flushReplenish: provide_buffers failed at bid={d}: {s}, {d} remaining", .{ bid, @errorName(err), self.replenish_queue.items.len - i });
                 // Shift remaining items to front
                 const remaining = self.replenish_queue.items[i..];
                 std.mem.copyForwards(u16, self.replenish_queue.items[0..remaining.len], remaining);

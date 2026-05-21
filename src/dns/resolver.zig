@@ -1,6 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
+const logWarn = @import("../async_logger.zig").logWarn;
 
 const packet = @import("packet.zig");
 const cache_mod = @import("cache.zig");
@@ -213,7 +214,7 @@ pub const DnsResolver = struct {
             // Failed to store the result (OOM). The fiber will see
             // error.DnsTimeout and retry. Log so the operator knows
             // DNS is working but memory is tight.
-            std.log.warn("DnsResolver: failed to store result for txid={d}, will retry", .{txid});
+            logWarn("DnsResolver: failed to store result for txid={d}, will retry", .{txid});
         };
 
         Fiber.dnsResume(&pending.value.slot);

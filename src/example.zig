@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const logErr = @import("async_logger.zig").logErr;
 
 // ========== Re-exports ==========
 pub const constants = @import("constants.zig");
@@ -112,7 +113,7 @@ const Example = struct {
         _ = allocator;
         std.debug.print("[Middleware] Request: {s}\n", .{ctx.path});
         ctx.text(401, "Unauthorized") catch |err| {
-            std.log.err("jwtMiddleware: ctx.text failed: {s}", .{@errorName(err)});
+            logErr("jwtMiddleware: ctx.text failed: {s}", .{@errorName(err)});
         };
         return true;
     }

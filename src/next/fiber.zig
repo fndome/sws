@@ -1,5 +1,6 @@
 const std = @import("std");
 const IoFiber = std.Io.fiber;
+const logErr = @import("../async_logger.zig").logErr;
 
 pub const FiberCall = struct {
     userCtx: ?*anyopaque,
@@ -101,7 +102,7 @@ pub const Fiber = struct {
     pub fn pushResume(slot_idx: u32, gen_id: u32, data: []const u8) void {
         const next = resume_tail +% 1;
         if (next == resume_head) {
-            std.log.err("Fiber.pushResume: resume queue full (cap={d}), entry dropped — slot={d} gen={d}", .{ RESUME_QUEUE_CAP -| 1, slot_idx, gen_id });
+            logErr("Fiber.pushResume: resume queue full (cap={d}), entry dropped — slot={d} gen={d}", .{ RESUME_QUEUE_CAP -| 1, slot_idx, gen_id });
             return;
         }
         resume_queue[resume_tail] = .{ .slot_idx = slot_idx, .gen_id = gen_id, .data = data };

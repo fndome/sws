@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const SubmitQueue = @import("queue.zig").SubmitQueue;
 const Item = @import("queue.zig").Item;
 const fiber_mod = @import("fiber.zig");
+const logErr = @import("../async_logger.zig").logErr;
 const Fiber = fiber_mod.Fiber;
 
 const TaskCtx = struct {
@@ -339,7 +340,7 @@ pub const Next = struct {
         comptime execFn: fn (*T, *const fn (?*anyopaque, []const u8) void) void,
     ) bool {
         const n = @atomicLoad(?*Next, &default_next, .acquire) orelse {
-            std.log.err("Next.submit: no default Next instance set", .{});
+            logErr("Next.submit: no default Next instance set", .{});
             return false;
         };
         const user = n.allocator.create(T) catch return false;
@@ -370,7 +371,7 @@ pub const Next = struct {
         }
 
         // No pool — log error, destroy user ctx
-        std.log.err("Next.submit: no worker pool configured. Call initPool4NextSubmit(n) first.", .{});
+        logErr("Next.submit: no worker pool configured. Call initPool4NextSubmit(n) first.", .{});
         n.allocator.destroy(user);
         return false;
     }
@@ -381,7 +382,7 @@ pub const Next = struct {
         comptime execFn: fn (*T, *const fn (?*anyopaque, []const u8) void) void,
     ) bool {
         const n = @atomicLoad(?*Next, &default_next, .acquire) orelse {
-            std.log.err("Next.go: no default Next instance set", .{});
+            logErr("Next.go: no default Next instance set", .{});
             return false;
         };
         return n.push(T, ctx, execFn, n.default_stack_size);
@@ -394,7 +395,7 @@ pub const Next = struct {
         stack_size: u32,
     ) bool {
         const n = @atomicLoad(?*Next, &default_next, .acquire) orelse {
-            std.log.err("Next.goWithStackConfigurable: no default Next instance set", .{});
+            logErr("Next.goWithStackConfigurable: no default Next instance set", .{});
             return false;
         };
         return n.push(T, ctx, execFn, stack_size);
@@ -480,7 +481,7 @@ pub const Next = struct {
             // Ring full → yield + 1 retry built into ringbuffer.push()
             self.allocator.destroy(gc);
             self.allocator.destroy(user);
-            std.log.err("Next.push: ringbuffer full after retry, task dropped", .{});
+            logErr("Next.push: ringbuffer full after retry, task dropped", .{});
             return false;
         }
         // 修改原因：HTTP/WS 调用方需要知道是否入队成功，失败时才能回收请求缓冲。

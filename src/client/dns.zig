@@ -2,6 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 
+const logErr = @import("../async_logger.zig").logErr;
 const RingShared = @import("../shared/ring_shared.zig").RingShared;
 const Fiber = @import("../next/fiber.zig").Fiber;
 
@@ -54,7 +55,7 @@ pub const CaresDns = struct {
         var channel: ?*anyopaque = null;
         const status = ares_init(&channel);
         if (status != ARES_SUCCESS) {
-            std.log.err("c-ares init failed: {s}", .{std.mem.span(ares_strerror(status))});
+            logErr("c-ares init failed: {s}", .{std.mem.span(ares_strerror(status))});
             return error.DnsInitFailed;
         }
         return CaresDns{

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const logErr = @import("../async_logger.zig").logErr;
 
 /// ── 通用块缓冲池 ────────────────────────────────────────
 ///
@@ -75,7 +76,7 @@ pub fn BufferBlockPool(comptime block_size: usize, comptime capacity: usize) typ
             for (self.blocks, 0..) |block, i| {
                 if (block.ptr == buf.ptr) {
                     if (self.states[i] == STATE_IDLE) {
-                        std.log.err("LargeBufferPool: double-free detected for block idx={d} ptr=0x{x}", .{ i, @intFromPtr(buf.ptr) });
+                        logErr("LargeBufferPool: double-free detected for block idx={d} ptr=0x{x}", .{ i, @intFromPtr(buf.ptr) });
                         return;
                     }
                     self.states[i] = STATE_IDLE;
@@ -84,7 +85,7 @@ pub fn BufferBlockPool(comptime block_size: usize, comptime capacity: usize) typ
                     return;
                 }
             }
-            std.log.err("LargeBufferPool.release: buffer 0x{x} not found in pool", .{@intFromPtr(buf.ptr)});
+            logErr("LargeBufferPool.release: buffer 0x{x} not found in pool", .{@intFromPtr(buf.ptr)});
         }
     };
 }

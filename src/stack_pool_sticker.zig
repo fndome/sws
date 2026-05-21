@@ -15,7 +15,7 @@ const WsWork = @import("stack_pool.zig").WsWork;
 const ComputeWork = @import("stack_pool.zig").ComputeWork;
 
 pub fn logErr(comptime fmt: []const u8, args: anytype) void {
-    std.log.err(fmt, args);
+    @import("async_logger.zig").logErr(fmt, args);
 }
 
 /// ── 全系统总开关 ──────────────────────────────────────

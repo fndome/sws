@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const logErr = @import("../async_logger.zig").logErr;
 const AsyncServer = @import("async_server.zig").AsyncServer;
 const Context = @import("context.zig").Context;
 
@@ -44,7 +45,7 @@ pub fn sendDeferredResponse(self: *AsyncServer, conn_id: u64, status: u16, ct: C
     invokeOnIoThread(self, DeferredNode, node, deferredRespond) catch {
         // InvokeQueue full: the deferred response cannot be delivered.
         // Free the body to avoid leaking and log the drop.
-        std.log.err("sendDeferredResponse: invoke queue full, dropping response for conn_id={d}", .{conn_id});
+        logErr("sendDeferredResponse: invoke queue full, dropping response for conn_id={d}", .{conn_id});
         self.allocator.free(body);
     };
 }
