@@ -31,11 +31,13 @@ pub fn wsTaskExecWrapperWithOwnership(t: *WsTaskCtx, complete: *const fn (?*anyo
 
 fn wsTaskRecycle(t: *WsTaskCtx) void {
     std.debug.assert(t.tag == 0x57530001);
+    // Always return the read buffer bid to io_uring. If the connection
+    // was freed before this task completed, skip connection state updates
+    // but still replenish the buffer. markReplenish has internal duplicate-
+    // bid detection for safety.
+    t.server.buffer_pool.markReplenish(t.read_bid);
     if (t.server.connections.getPtr(t.conn_id)) |conn| {
-        if (!conn.read_buf_recycled) {
-            conn.read_buf_recycled = true;
-            t.server.buffer_pool.markReplenish(t.read_bid);
-        }
+        conn.read_buf_recycled = true;
         conn.read_len = 0;
     }
     // 修改原因：Next.push 会复制任务并自行释放任务内存，这里只释放任务持有的 payload。

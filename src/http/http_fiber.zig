@@ -152,11 +152,13 @@ pub fn httpTaskExecWrapperWithOwnership(t: *HttpTaskCtx, complete: *const fn (?*
 
 fn httpTaskRecycle(t: *HttpTaskCtx) void {
     std.debug.assert(t.tag == 0x48540001);
+    // Always return the read buffer bid to io_uring. If the connection
+    // was freed before this task completed (close CQE arrived first),
+    // skip connection state updates but still replenish the buffer.
+    // markReplenish has internal duplicate-bid detection for safety.
+    t.server.buffer_pool.markReplenish(t.read_bid);
     if (t.server.connections.getPtr(t.conn_id)) |conn| {
-        if (!conn.read_buf_recycled) {
-            conn.read_buf_recycled = true;
-            t.server.buffer_pool.markReplenish(t.read_bid);
-        }
+        conn.read_buf_recycled = true;
         conn.read_len = 0;
         const has_stream = conn.pool_idx != 0xFFFFFFFF and
             sticker.getStream(&t.server.pool.slots[conn.pool_idx]) != null;
