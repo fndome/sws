@@ -168,7 +168,6 @@ const CacheLine4_6 = extern struct {
     /// NOTE: write_iovs live here (Line4), NOT in workspace (Line5).
     /// This guarantees in-flight write iovecs are never corrupted
     /// by workspace union state switches (http→ws, ws→compute).
-    response_buf_ptr: u64 = 0,
     response_buf_tier: u8 = 0,
     /// 内核正在异步读取 write_iovs（writev SQE 已提交但 CQE 未到）。
     /// 置位期间严禁对 Line4 做任何 memcpy / 重置 / iovec 修改。
@@ -179,12 +178,12 @@ const CacheLine4_6 = extern struct {
         .{ .base = undefined, .len = 0 },
         .{ .base = undefined, .len = 0 },
     },
-    ws_write_queue_head: u64 = 0,
     ws_write_queue_tail: u64 = 0,
-    ws_token_ptr: u64 = 0,
-    ws_token_len: u32 = 0,
     /// 二级计算区：写路径临时暂存 (NATS sequence / 校验和 / 协议中间态)
     write_scratch: [48]u8 = [_]u8{0} ** 48,
+    /// Reserved: formerly response_buf_ptr, ws_write_queue_head, ws_token_ptr,
+    /// ws_token_len — dead fields removed, padding maintains 128 B cache line.
+    _reserved: [32]u8 = [_]u8{0} ** 32,
 };
 
 const CacheLine5 = extern struct {
