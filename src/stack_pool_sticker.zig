@@ -57,6 +57,11 @@ pub fn slotAlloc(pool: anytype, fd: i32, conn_gen_id: *u32, now_ms: i64) struct 
     const slot = &pool.slots[idx];
     // Debug: verify sentinel intact (catches buffer overflow from previous slot user)
     std.debug.assert(slot.line5.sentinel == 0x53574153);
+    // Clear cache-line groups that may carry stale pointers from the previous
+    // slot user (large_buf_ptr, stream_ptr, write_iovs, ws_write_queue_* etc.).
+    // line5 (workspace + sentinel) is preserved — sentinel is verified above.
+    slot.line3 = .{};
+    slot.line4 = .{};
     slot.line1.gen_id = gen_id;
     slot.line1.fd = fd;
     slot.line1.state = .reading;
