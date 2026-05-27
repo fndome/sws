@@ -155,8 +155,8 @@ const Example = struct {
 
     fn wsEchoHandler(conn_id: u64, frame: *const Frame, ctx: *anyopaque) void {
         if (frame.opcode == .text or frame.opcode == .binary) {
-            const ws = @as(*WsServer, @ptrCast(@alignCast(ctx)));
-            ws.sendWsFrame(conn_id, frame.opcode, frame.payload) catch |err| {
+            const server = @as(*AsyncServer, @ptrCast(@alignCast(ctx)));
+            server.ws_server.sendWsFrame(conn_id, frame.opcode, frame.payload) catch |err| {
                 std.debug.print("ws send error: {}\n", .{err});
             };
         }

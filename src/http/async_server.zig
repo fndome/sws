@@ -323,7 +323,6 @@ pub const AsyncServer = struct {
         };
         server.rs = RingShared.bind(&server.ring, &server.io_registry);
 
-        server.ws_server.ctx = &server;
         try server.buffer_pool.provideAllReads(&server.ring);
 
         // 预分配内存池，消除冷启动时的动态分配

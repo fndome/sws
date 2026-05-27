@@ -51,6 +51,11 @@ pub fn drainPendingResumes(self: *AsyncServer) void {
 }
 
 pub fn run(self: *AsyncServer) !void {
+    // AsyncServer.init returns the server by value, so any pointer captured
+    // inside init would point at the temporary local. Bind the WebSocket
+    // callback context here, after the caller's final server address exists.
+    self.ws_server.ctx = self;
+
     if (self.cfg.io_cpu) |cpu| {
         var mask: linux.cpu_set_t = [_]usize{0} ** (linux.CPU_SETSIZE / @sizeOf(usize));
         mask[0] = @as(usize, 1) << @as(u6, cpu);

@@ -39,6 +39,10 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
             self.allocator.free(t);
             conn.ws_token = null;
         }
+        if (conn.ws_partial) |p| {
+            self.allocator.free(p);
+            conn.ws_partial = null;
+        }
 
         self.drainWsWriteQueue(conn);
 

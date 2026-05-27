@@ -15,6 +15,30 @@ const Fiber = @import("../next/fiber.zig").Fiber;
 const ws_fiber = @import("ws_fiber.zig");
 const logErr = helpers.logErr;
 const milliTimestamp = @import("event_loop.zig").milliTimestamp;
+const MAX_WS_ACCUMULATED_FRAME_SIZE: usize = 1024 * 1024;
+
+fn wsFrameInput(allocator: Allocator, conn: *Connection, data: []u8, owned_out: *?[]u8) ![]u8 {
+    const partial = conn.ws_partial orelse return data;
+    if (partial.len + data.len > MAX_WS_ACCUMULATED_FRAME_SIZE) return error.FrameTooLarge;
+
+    const combined = try allocator.alloc(u8, partial.len + data.len);
+    @memcpy(combined[0..partial.len], partial);
+    @memcpy(combined[partial.len..], data);
+    allocator.free(partial);
+    conn.ws_partial = null;
+    owned_out.* = combined;
+    return combined;
+}
+
+fn storeIncompleteWsFrame(allocator: Allocator, conn: *Connection, data: []u8, owned_data: *?[]u8) !void {
+    if (data.len > MAX_WS_ACCUMULATED_FRAME_SIZE) return error.FrameTooLarge;
+    if (owned_data.*) |owned| {
+        conn.ws_partial = owned;
+        owned_data.* = null;
+        return;
+    }
+    conn.ws_partial = try allocator.dupe(u8, data);
+}
 
 fn finishSynchronousWsHandler(self: *AsyncServer, conn_id: u64, conn: *Connection, bid: u16) void {
     // 修改原因：同步兜底 handler 使用的 payload 可能还指向 read buffer，必须等 handler 返回后再归还 bid。
@@ -126,6 +150,14 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
     if (conn.read_len > 0) self.buffer_pool.markReplenish(conn.read_bid);
     conn.read_bid = bid;
     conn.read_len = nread;
+    var owned_frame_input: ?[]u8 = null;
+    defer if (owned_frame_input) |buf| self.allocator.free(buf);
+    const frame_input = wsFrameInput(self.allocator, conn, read_buf[0..nread], &owned_frame_input) catch {
+        self.buffer_pool.markReplenish(bid);
+        conn.read_len = 0;
+        self.closeConn(conn_id, conn.fd);
+        return;
+    };
 
     // Refresh TTL activity timestamp for WebSocket connections.
     // slot.line2.last_active_ms is only set at accept time; without this,
@@ -135,11 +167,32 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
         self.pool.slots[conn.pool_idx].line2.last_active_ms = now_ws;
     }
 
-    const frame = ws_frame.parseFrame(read_buf[0..nread]) catch {
-        self.buffer_pool.markReplenish(bid);
-        conn.read_len = 0;
-        self.closeConn(conn_id, conn.fd);
-        return;
+    const frame = ws_frame.parseFrame(frame_input) catch |err| {
+        switch (err) {
+            error.IncompleteFrame => {
+                // 修改原因：TCP 可以把一个 WebSocket frame 拆成多次 read；半帧应累计等待下一段，
+                // 不能当协议错误直接断开连接。
+                storeIncompleteWsFrame(self.allocator, conn, frame_input, &owned_frame_input) catch {
+                    self.buffer_pool.markReplenish(bid);
+                    conn.read_len = 0;
+                    self.closeConn(conn_id, conn.fd);
+                    return;
+                };
+                self.buffer_pool.markReplenish(bid);
+                conn.read_len = 0;
+                conn.state = .ws_reading;
+                self.submitRead(conn_id, conn) catch {
+                    self.closeConn(conn_id, conn.fd);
+                };
+                return;
+            },
+            else => {
+                self.buffer_pool.markReplenish(bid);
+                conn.read_len = 0;
+                self.closeConn(conn_id, conn.fd);
+                return;
+            },
+        }
     };
 
     if (conn.pool_idx != 0xFFFFFFFF) {
@@ -464,6 +517,27 @@ fn maxWriteRetries(total: usize) u8 {
     const base: usize = total / 4096;
     const retries: usize = if (base < 4) @as(usize, 4) else if (base > 64) @as(usize, 64) else base;
     return @intCast(retries);
+}
+
+test "WebSocket frame input accumulates split TCP reads" {
+    var conn = Connection{};
+    var owned: ?[]u8 = null;
+    defer if (owned) |buf| std.testing.allocator.free(buf);
+    defer if (conn.ws_partial) |buf| std.testing.allocator.free(buf);
+
+    var first = [_]u8{ 0x81, 0x85, 1, 2, 3, 4, 0x69, 0x67 };
+    const first_input = try wsFrameInput(std.testing.allocator, &conn, first[0..], &owned);
+    try std.testing.expectError(error.IncompleteFrame, ws_frame.parseFrame(first_input));
+    try storeIncompleteWsFrame(std.testing.allocator, &conn, first_input, &owned);
+    try std.testing.expect(conn.ws_partial != null);
+
+    var second = [_]u8{ 0x6f, 0x68, 0x6e };
+    const full_input = try wsFrameInput(std.testing.allocator, &conn, second[0..], &owned);
+    try std.testing.expect(conn.ws_partial == null);
+
+    const frame = try ws_frame.parseFrame(full_input);
+    try std.testing.expectEqual(Opcode.text, frame.opcode);
+    try std.testing.expectEqualStrings("hello", frame.payload);
 }
 
 test "sendWsFrame queues while protocol write is in flight" {
