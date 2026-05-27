@@ -42,6 +42,13 @@ fn fdSetHas(set: *const fd_set, fd: i32) bool {
     return (set.fds_bits[word] & (@as(u32, 1) << bit)) != 0;
 }
 
+fn dnsFdFromUserData(ud: u64) !i32 {
+    if (ud < DNS_FD_MAGIC) return error.InvalidDnsUserData;
+    const raw = ud - DNS_FD_MAGIC;
+    if (raw > std.math.maxInt(i32)) return error.InvalidDnsUserData;
+    return @intCast(raw);
+}
+
 pub const CaresDns = struct {
     allocator: Allocator,
     channel: ?*anyopaque,
@@ -101,7 +108,7 @@ pub const CaresDns = struct {
 
     pub fn handleCqe(self: *CaresDns, ud: u64, res: i32) void {
         _ = res;
-        const fd: i32 = @intCast(ud - DNS_FD_MAGIC);
+        const fd = dnsFdFromUserData(ud) catch return;
         ares_process_fd(self.channel, fd, -1);
         self.registerFds();
     }
@@ -182,4 +189,10 @@ test "fdSetHas ignores descriptors outside fixed fd_set capacity" {
     try std.testing.expect(fdSetHas(&fds, 1023));
     try std.testing.expect(!fdSetHas(&fds, 1024));
     try std.testing.expect(!fdSetHas(&fds, -1));
+}
+
+test "dnsFdFromUserData rejects invalid CQE tokens" {
+    try std.testing.expectError(error.InvalidDnsUserData, dnsFdFromUserData(DNS_FD_MAGIC - 1));
+    try std.testing.expectError(error.InvalidDnsUserData, dnsFdFromUserData(DNS_FD_MAGIC + @as(u64, std.math.maxInt(i32)) + 1));
+    try std.testing.expectEqual(@as(i32, 42), try dnsFdFromUserData(DNS_FD_MAGIC + 42));
 }

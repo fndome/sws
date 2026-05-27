@@ -60,8 +60,10 @@ pub fn parseFrame(data: []u8) !Frame {
         offset += 4;
     }
 
-    if (data.len < offset + payload_len) return error.IncompleteFrame;
-    const payload = data[offset..][0..@as(usize, @intCast(payload_len))];
+    if (payload_len > std.math.maxInt(usize)) return error.FrameTooLarge;
+    const payload_len_usize: usize = @intCast(payload_len);
+    if (payload_len_usize > data.len - offset) return error.IncompleteFrame;
+    const payload = data[offset..][0..payload_len_usize];
 
     if (mask) {
         maskPayload(payload, mask_key);
@@ -110,6 +112,11 @@ test "parseFrame rejects non-minimal payload length encoding" {
 
     var medium_as_127 = [_]u8{ 0x81, 0xFF, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF };
     try std.testing.expectError(error.InvalidFrame, parseFrame(&medium_as_127));
+}
+
+test "parseFrame rejects payload lengths that cannot fit host slices" {
+    var huge = [_]u8{ 0x81, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0 };
+    try std.testing.expectError(error.FrameTooLarge, parseFrame(&huge));
 }
 
 test "parseFrame rejects unsupported fragmented data frames" {

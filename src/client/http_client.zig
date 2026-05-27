@@ -292,7 +292,8 @@ fn responseCompleteLenForMethod(data: []const u8, method: []const u8) !?usize {
         return error.MissingContentLength;
     };
     // 修改原因：上游 keep-alive 时连接不会 EOF，必须按 Content-Length 判断响应边界。
-    const total = bounds.header_end + bounds.sep_len + content_len;
+    const header_total = std.math.add(usize, bounds.header_end, bounds.sep_len) catch return error.InvalidResponse;
+    const total = std.math.add(usize, header_total, content_len) catch return error.InvalidResponse;
     if (data.len < total) return null;
     return total;
 }
@@ -940,6 +941,13 @@ test "HttpClient responseCompleteLen rejects duplicate Content-Length" {
 test "HttpClient responseCompleteLen rejects malformed Content-Length" {
     try std.testing.expectError(error.InvalidContentLength, responseCompleteLen("HTTP/1.1 200 OK\r\nContent-Length: 01\r\n\r\nx"));
     try std.testing.expectError(error.InvalidContentLength, responseCompleteLen("HTTP/1.1 200 OK\r\nContent-Length: 1x\r\n\r\nx"));
+}
+
+test "HttpClient responseCompleteLen rejects overflowing response boundary" {
+    try std.testing.expectError(
+        error.InvalidResponse,
+        responseCompleteLen("HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551615\r\n\r\n"),
+    );
 }
 
 test "HttpClient responseCompleteLen rejects Transfer-Encoding" {

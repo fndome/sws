@@ -148,7 +148,10 @@ pub const Context = struct {
         if (self.getHeader("Content-Length:")) |raw_cl| {
             // 修改原因：Content-Length 缺失和显式 0 不能都当成 0；显式 0 必须返回空 body。
             const cl = std.fmt.parseInt(usize, raw_cl, 10) catch return "";
-            const end = @min(start + cl, self.request_data.len);
+            // 修改原因：恶意超大 Content-Length 不能让 start + cl 溢出；只返回当前已缓存的数据窗口。
+            const available = self.request_data.len - start;
+            const body_len = @min(cl, available);
+            const end = start + body_len;
             return self.request_data[start..end];
         }
         return self.request_data[start..];
@@ -264,4 +267,14 @@ test "Context.requestBody returns empty body for explicit zero Content-Length" {
         .allocator = std.testing.allocator,
     };
     try std.testing.expectEqualStrings("", ctx.requestBody());
+}
+
+test "Context.requestBody clamps oversized Content-Length without overflow" {
+    var ctx = Context{
+        .request_data = "POST / HTTP/1.1\r\nContent-Length: 18446744073709551615\r\n\r\nabc",
+        .path = "/",
+        .app_ctx = null,
+        .allocator = std.testing.allocator,
+    };
+    try std.testing.expectEqualStrings("abc", ctx.requestBody());
 }

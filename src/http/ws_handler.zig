@@ -19,7 +19,11 @@ const MAX_WS_ACCUMULATED_FRAME_SIZE: usize = 1024 * 1024;
 
 fn wsFrameInput(allocator: Allocator, conn: *Connection, data: []u8, owned_out: *?[]u8) ![]u8 {
     const partial = conn.ws_partial orelse return data;
-    if (partial.len + data.len > MAX_WS_ACCUMULATED_FRAME_SIZE) return error.FrameTooLarge;
+    if (partial.len > MAX_WS_ACCUMULATED_FRAME_SIZE or
+        data.len > MAX_WS_ACCUMULATED_FRAME_SIZE - partial.len)
+    {
+        return error.FrameTooLarge;
+    }
 
     const combined = try allocator.alloc(u8, partial.len + data.len);
     @memcpy(combined[0..partial.len], partial);
@@ -538,6 +542,19 @@ test "WebSocket frame input accumulates split TCP reads" {
     const frame = try ws_frame.parseFrame(full_input);
     try std.testing.expectEqual(Opcode.text, frame.opcode);
     try std.testing.expectEqualStrings("hello", frame.payload);
+}
+
+test "WebSocket frame input rejects accumulated overflow" {
+    var conn = Connection{};
+    conn.ws_partial = try std.testing.allocator.alloc(u8, MAX_WS_ACCUMULATED_FRAME_SIZE);
+    defer if (conn.ws_partial) |buf| std.testing.allocator.free(buf);
+
+    var owned: ?[]u8 = null;
+    var extra = [_]u8{0};
+    try std.testing.expectError(
+        error.FrameTooLarge,
+        wsFrameInput(std.testing.allocator, &conn, extra[0..], &owned),
+    );
 }
 
 test "sendWsFrame queues while protocol write is in flight" {
