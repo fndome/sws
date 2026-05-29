@@ -415,7 +415,7 @@ pub const HttpClient = struct {
 
     pub fn enableTls(self: *HttpClient) !void {
         if (self.tls_client_config == null) {
-            self.tls_client_config = try TlsConfig.init(null, null, false);
+            self.tls_client_config = try TlsConfig.init(self.allocator, null, null, false);
         }
     }
 

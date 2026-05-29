@@ -253,7 +253,7 @@ pub const AsyncServer = struct {
 
         var tls_config: ?TlsConfig = null;
         if (tls_auth) |auth| {
-            tls_config = try TlsConfig.init(auth.cert_path, auth.key_path, true);
+            tls_config = try TlsConfig.init(allocator, auth.cert_path, auth.key_path, true);
         }
         errdefer if (tls_config) |*tc| tc.deinit();
 

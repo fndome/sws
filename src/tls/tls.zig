@@ -1,5 +1,5 @@
 const std = @import("std");
-const boring = @import("boring.zig");
+const tls_lib = @import("tls");
 
 pub const HandshakeStep = enum {
     want_read,
@@ -9,178 +9,193 @@ pub const HandshakeStep = enum {
 };
 
 pub const TlsConfig = struct {
-    ctx: *boring.SSL_CTX,
+    allocator: std.mem.Allocator,
     is_server: bool,
+    cert_key_pair: ?tls_lib.config.CertKeyPair = null,
+    root_ca: ?tls_lib.config.cert.Bundle = null,
+    init_now: std.Io.Timestamp,
 
-    pub fn init(cert_path: ?[:0]const u8, key_path: ?[:0]const u8, is_server: bool) !TlsConfig {
-        const method = if (is_server)
-            boring.TLS_server_method()
-        else
-            boring.TLS_client_method();
-        const ctx = boring.SSL_CTX_new(method) orelse return error.TlsInitFailed;
-        errdefer boring.SSL_CTX_free(ctx);
-
-        _ = boring.SSL_CTX_set_min_proto_version(ctx, boring.TLS1_2_VERSION);
-        _ = boring.SSL_CTX_set_max_proto_version(ctx, boring.TLS1_3_VERSION);
-        _ = boring.SSL_CTX_set_options(ctx, boring.SSL_OP_NO_SSLv3 | boring.SSL_OP_NO_TLSv1 | boring.SSL_OP_NO_TLSv1_1);
+    pub fn init(allocator: std.mem.Allocator, cert_path: ?[:0]const u8, key_path: ?[:0]const u8, is_server: bool) !TlsConfig {
+        const io = std.Io{};
+        const now = std.Io.Clock.real.now(io);
 
         if (is_server) {
-            if (cert_path) |cert| {
-                if (boring.SSL_CTX_use_certificate_file(ctx, cert, boring.SSL_FILETYPE_PEM) != 1) {
-                    return error.CertificateLoadFailed;
-                }
-            }
-            if (key_path) |key| {
-                if (boring.SSL_CTX_use_PrivateKey_file(ctx, key, boring.SSL_FILETYPE_PEM) != 1) {
-                    return error.PrivateKeyLoadFailed;
-                }
-            }
+            if (cert_path == null or key_path == null) return error.MissingCertificate;
+            const ckp = try tls_lib.config.CertKeyPair.fromFilePathAbsolute(allocator, io, cert_path.?, key_path.?);
+            return TlsConfig{
+                .allocator = allocator,
+                .is_server = true,
+                .cert_key_pair = ckp,
+                .init_now = now,
+            };
+        } else {
+            return TlsConfig{
+                .allocator = allocator,
+                .is_server = false,
+                .init_now = now,
+            };
         }
-
-        return TlsConfig{ .ctx = ctx, .is_server = is_server };
     }
 
     pub fn deinit(self: *TlsConfig) void {
-        boring.SSL_CTX_free(self.ctx);
-        self.ctx = undefined;
+        if (self.cert_key_pair) |*ckp| {
+            ckp.deinit(self.allocator);
+        }
+        if (self.root_ca) |*ca| {
+            ca.deinit(self.allocator);
+        }
+    }
+
+    fn serverOptions(self: *const TlsConfig) tls_lib.config.Server {
+        return .{
+            .rng = std.crypto.random,
+            .auth = if (self.cert_key_pair) |*ckp| @constCast(ckp) else null,
+            .now = self.init_now,
+        };
+    }
+
+    fn clientOptions(self: *const TlsConfig) tls_lib.config.Client {
+        return .{
+            .rng = std.crypto.random,
+            .now = self.init_now,
+            .host = "localhost",
+            .insecure_skip_verify = true,
+        };
     }
 };
 
 pub const TlsStream = struct {
-    ssl: *boring.SSL,
-    in_bio: *boring.BIO,
-    out_bio: *boring.BIO,
-    handshake_out_buf: [16384]u8 = [_]u8{0} ** 16384,
+    state: State,
+    ready_cipher: ?tls_lib.Cipher = null,
+    handshake_out_buf: [tls_lib.max_ciphertext_record_len]u8 = [_]u8{0} ** tls_lib.max_ciphertext_record_len,
     handshake_out_len: usize = 0,
     pending_handshake_write: bool = false,
+    saved_ciphertext: [tls_lib.max_ciphertext_record_len]u8 = [_]u8{0} ** tls_lib.max_ciphertext_record_len,
+    saved_ciphertext_len: usize = 0,
+
+    const State = union(enum) {
+        server: tls_lib.nonblock.Server,
+        client: tls_lib.nonblock.Client,
+        connected: tls_lib.nonblock.Connection,
+    };
 
     pub fn new(config: *const TlsConfig) !TlsStream {
-        const ssl = boring.SSL_new(config.ctx) orelse return error.TlsStreamNewFailed;
-        errdefer boring.SSL_free(ssl);
-
-        _ = boring.SSL_set_options(ssl, boring.SSL_OP_NO_RENEGOTIATION);
-
         if (config.is_server) {
-            boring.SSL_set_accept_state(ssl);
+            return TlsStream{
+                .state = .{ .server = tls_lib.nonblock.Server.init(config.serverOptions()) },
+            };
         } else {
-            boring.SSL_set_connect_state(ssl);
+            return TlsStream{
+                .state = .{ .client = tls_lib.nonblock.Client.init(config.clientOptions()) },
+            };
         }
-
-        const in_bio = boring.BIO_new(boring.BIO_s_mem().?) orelse {
-            boring.SSL_free(ssl);
-            return error.BioNewFailed;
-        };
-        const out_bio = boring.BIO_new(boring.BIO_s_mem().?) orelse {
-            boring.BIO_free(in_bio);
-            boring.SSL_free(ssl);
-            return error.BioNewFailed;
-        };
-
-        boring.SSL_set_bio(ssl, in_bio, out_bio);
-
-        return TlsStream{
-            .ssl = ssl,
-            .in_bio = in_bio,
-            .out_bio = out_bio,
-        };
     }
 
     pub fn free(self: *TlsStream) void {
-        boring.SSL_free(self.ssl);
-        self.ssl = undefined;
-        self.in_bio = undefined;
-        self.out_bio = undefined;
+        self.* = undefined;
     }
 
     pub fn handshakeAdvance(self: *TlsStream, in_data: ?[]const u8) !HandshakeStep {
-        if (in_data) |data| {
-            if (data.len > 0) {
-                const write_len: i32 = @intCast(data.len);
-                const written = boring.BIO_write(self.in_bio, data.ptr, write_len);
-                if (written != write_len) return error.TlsBioError;
+        if (self.ready_cipher) |cipher| {
+            if (in_data) |data| {
+                if (data.len > 0 and self.saved_ciphertext_len == 0) {
+                    const n = @min(data.len, self.saved_ciphertext.len);
+                    @memcpy(self.saved_ciphertext[0..n], data[0..n]);
+                    self.saved_ciphertext_len = n;
+                }
             }
+            self.state = .{ .connected = tls_lib.nonblock.Connection.init(cipher) };
+            self.ready_cipher = null;
+            return .done;
         }
 
-        self.handshake_out_len = 0;
-        self.pending_handshake_write = false;
+        const in = in_data orelse &.{};
 
-        while (true) {
-            const ret = boring.SSL_do_handshake(self.ssl);
-            if (ret == 1) return .done;
-
-            const err = boring.SSL_get_error(self.ssl, ret);
-            switch (err) {
-                boring.SSL_ERROR_WANT_READ => {
-                    const pending = boring.BIO_ctrl_pending(self.out_bio);
-                    if (pending > 0) {
-                        self.handshake_out_len = pending;
-                        return .want_write;
-                    }
-                    return .want_read;
-                },
-                boring.SSL_ERROR_WANT_WRITE => {
-                    const pending = boring.BIO_ctrl_pending(self.out_bio);
-                    self.handshake_out_len = if (pending <= self.handshake_out_buf.len) pending else self.handshake_out_buf.len;
-                    self.pending_handshake_write = true;
-                    return .want_write;
-                },
-                else => return error.TlsHandshakeFailed,
-            }
+        switch (self.state) {
+            .server => |*s| {
+                if (s.done()) {
+                    return finalizeHandshake(self, s.cipher().?, 0);
+                }
+                const res = s.run(in, &self.handshake_out_buf) catch return .error;
+                if (s.done()) {
+                    return finalizeHandshake(self, s.cipher().?, res.send.len);
+                }
+                self.handshake_out_len = res.send.len;
+                if (res.send.len > 0) return .want_write;
+                return .want_read;
+            },
+            .client => |*c| {
+                if (c.done()) {
+                    return finalizeHandshake(self, c.cipher().?, 0);
+                }
+                const res = c.run(in, &self.handshake_out_buf) catch return .error;
+                if (c.done()) {
+                    return finalizeHandshake(self, c.cipher().?, res.send.len);
+                }
+                self.handshake_out_len = res.send.len;
+                if (res.send.len > 0) return .want_write;
+                return .want_read;
+            },
+            .connected => return .done,
         }
+    }
+
+    fn finalizeHandshake(self: *TlsStream, cipher: tls_lib.Cipher, send_len: usize) HandshakeStep {
+        if (send_len > 0) {
+            self.handshake_out_len = send_len;
+            self.ready_cipher = cipher;
+            return .want_write;
+        }
+        self.state = .{ .connected = tls_lib.nonblock.Connection.init(cipher) };
+        return .done;
     }
 
     pub fn handshakeOutput(self: *TlsStream) []const u8 {
-        if (self.handshake_out_len == 0) return &.{};
-        const read_len: i32 = @intCast(@min(self.handshake_out_len, self.handshake_out_buf.len));
-        const n = boring.BIO_read(self.out_bio, &self.handshake_out_buf, read_len);
-        if (n <= 0) {
-            self.handshake_out_len = 0;
-            return &.{};
-        }
-        self.handshake_out_len = @intCast(n);
-        return self.handshake_out_buf[0..@intCast(n)];
+        return self.handshake_out_buf[0..self.handshake_out_len];
     }
 
     pub fn read(self: *TlsStream, ciphertext: []const u8, plaintext: []u8) !usize {
-        if (ciphertext.len > 0) {
-            const write_len: i32 = @intCast(ciphertext.len);
-            const written = boring.BIO_write(self.in_bio, ciphertext.ptr, write_len);
-            if (written != write_len) return error.TlsBioError;
-        }
+        switch (self.state) {
+            .connected => |*conn| {
+                if (self.saved_ciphertext_len > 0) {
+                    const res = conn.decrypt(self.saved_ciphertext[0..self.saved_ciphertext_len], plaintext) catch |err| {
+                        return tlsErrorToReadError(err);
+                    };
+                    if (res.closed) return error.TlsConnectionClosed;
+                    self.saved_ciphertext_len = saveUnused(self.saved_ciphertext[0..], res.unused_ciphertext);
+                    if (res.cleartext.len > 0) return res.cleartext.len;
+                }
 
-        const read_len: i32 = @intCast(plaintext.len);
-        const ret = boring.SSL_read(self.ssl, plaintext.ptr, read_len);
-        if (ret <= 0) {
-            const err = boring.SSL_get_error(self.ssl, ret);
-            switch (err) {
-                boring.SSL_ERROR_WANT_READ => return 0,
-                boring.SSL_ERROR_WANT_WRITE => return 0,
-                boring.SSL_ERROR_ZERO_RETURN => return error.TlsConnectionClosed,
-                else => return error.TlsReadFailed,
-            }
+                const res = conn.decrypt(ciphertext, plaintext) catch |err| {
+                    return tlsErrorToReadError(err);
+                };
+                if (res.closed) return error.TlsConnectionClosed;
+                self.saved_ciphertext_len = saveUnused(self.saved_ciphertext[0..], res.unused_ciphertext);
+                return res.cleartext.len;
+            },
+            else => return 0,
         }
-        return @intCast(ret);
     }
 
     pub fn write(self: *TlsStream, plaintext: []const u8, ciphertext: []u8) !usize {
-        const write_len: i32 = @intCast(plaintext.len);
-        const ret = boring.SSL_write(self.ssl, plaintext.ptr, write_len);
-        if (ret <= 0) {
-            const err = boring.SSL_get_error(self.ssl, ret);
-            switch (err) {
-                boring.SSL_ERROR_WANT_READ => return 0,
-                boring.SSL_ERROR_WANT_WRITE => return 0,
-                boring.SSL_ERROR_ZERO_RETURN => return error.TlsConnectionClosed,
-                else => return error.TlsWriteFailed,
-            }
+        switch (self.state) {
+            .connected => |*conn| {
+                const res = conn.encrypt(plaintext, ciphertext) catch return error.TlsWriteFailed;
+                return res.ciphertext.len;
+            },
+            else => return 0,
         }
-
-        const pending = boring.BIO_ctrl_pending(self.out_bio);
-        const to_read: i32 = @intCast(@min(pending, ciphertext.len));
-        const n = boring.BIO_read(self.out_bio, ciphertext.ptr, to_read);
-        if (n <= 0) {
-            return 0;
-        }
-        return @intCast(n);
     }
 };
+
+fn saveUnused(buf: []u8, unused: []const u8) usize {
+    if (unused.len == 0) return 0;
+    const n = @min(unused.len, buf.len);
+    @memcpy(buf[0..n], unused[0..n]);
+    return n;
+}
+
+fn tlsErrorToReadError(err: anyerror) anyerror {
+    if (err == error.TlsAlertCloseNotify) return error.TlsConnectionClosed;
+    return error.TlsReadFailed;
+}
