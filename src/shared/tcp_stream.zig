@@ -264,6 +264,7 @@ pub const RingSharedClient = struct {
         self.tls_handshaking = true;
 
         const step = tls_stream.handshakeAdvance(null) catch {
+            tls_stream.free();
             self.allocator.destroy(tls_stream);
             self.tls = null;
             self.tls_handshaking = false;
@@ -274,6 +275,7 @@ pub const RingSharedClient = struct {
             .want_write => {
                 const handshake_out = tls_stream.handshakeOutput();
                 self.writeRawTls(handshake_out) catch {
+                    tls_stream.free();
                     self.allocator.destroy(tls_stream);
                     self.tls = null;
                     self.tls_handshaking = false;
@@ -282,6 +284,7 @@ pub const RingSharedClient = struct {
             },
             .want_read => {
                 self.submitRead() catch {
+                    tls_stream.free();
                     self.allocator.destroy(tls_stream);
                     self.tls = null;
                     self.tls_handshaking = false;
@@ -292,6 +295,7 @@ pub const RingSharedClient = struct {
                 self.tls_handshaking = false;
             },
             .error => {
+                tls_stream.free();
                 self.allocator.destroy(tls_stream);
                 self.tls = null;
                 self.tls_handshaking = false;

@@ -171,6 +171,8 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             self.buffer_pool.markReplenish(pending_to_free);
         }
         conn.read_bid = bid;
+    } else {
+        conn.read_bid = 0;
     }
     conn.read_len = effective_nread;
 

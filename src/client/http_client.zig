@@ -819,6 +819,11 @@ fn httpRequestFiber(user_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []c
                         ctx.notify();
                         return;
                     };
+                } else {
+                    stream.deinit();
+                    ctx.response = makeErrorResponse(ctx.allocator, 502, "TLS config unavailable");
+                    ctx.notify();
+                    return;
                 }
             }
         }

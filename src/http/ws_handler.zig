@@ -186,6 +186,8 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
     if (!tls_decrypted) {
         if (conn.read_len > 0) self.buffer_pool.markReplenish(conn.read_bid);
         conn.read_bid = bid;
+    } else {
+        conn.read_bid = 0;
     }
     conn.read_len = effective_nread;
     var owned_frame_input: ?[]u8 = null;

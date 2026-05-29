@@ -185,7 +185,7 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
 
     const header_len = @min(conn.write_headers_len, resp_buf.len);
 
-    var ciphertext_buf: [16384]u8 = [_]u8{0} ** 16384;
+    var ciphertext_buf: [16384 + 2048]u8 = [_]u8{0} ** (16384 + 2048);
 
     if (conn.write_body) |body| {
         const total = header_len + body.len;
@@ -196,19 +196,22 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
 
         if (conn.write_offset < header_len) {
             const hdr_part = resp_buf[conn.write_offset..header_len];
-            @memcpy(plaintext_buf[plaintext_offset..][0..hdr_part.len], hdr_part);
-            plaintext_offset += hdr_part.len;
+            const to_copy = @min(hdr_part.len, plaintext_buf.len);
+            @memcpy(plaintext_buf[0..to_copy], hdr_part[0..to_copy]);
+            plaintext_offset += to_copy;
         }
 
-        const body_start = if (conn.write_offset > header_len)
-            conn.write_offset - header_len
-        else
-            0;
-        if (body_start < body.len) {
-            const body_part = body[body_start..];
-            const to_copy = @min(body_part.len, plaintext_buf.len - plaintext_offset);
-            @memcpy(plaintext_buf[plaintext_offset..][0..to_copy], body_part[0..to_copy]);
-            plaintext_offset += to_copy;
+        if (plaintext_offset < plaintext_buf.len) {
+            const body_start = if (conn.write_offset > header_len)
+                conn.write_offset - header_len
+            else
+                0;
+            if (body_start < body.len) {
+                const body_part = body[body_start..];
+                const to_copy = @min(body_part.len, plaintext_buf.len - plaintext_offset);
+                @memcpy(plaintext_buf[plaintext_offset..][0..to_copy], body_part[0..to_copy]);
+                plaintext_offset += to_copy;
+            }
         }
 
         const plaintext = plaintext_buf[0..plaintext_offset];
@@ -241,7 +244,15 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
     }
 }
 
-fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, _: i32) void {
+fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32) void {
+    if (res <= 0) {
+        if (conn.pool_idx != 0xFFFFFFFF) {
+            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+        }
+        self.closeConn(conn_id, conn.fd);
+        return;
+    }
+
     const header_len = if (conn.response_buf) |rb|
         @min(conn.write_headers_len, rb.len)
     else
