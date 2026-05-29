@@ -108,22 +108,42 @@ pub fn onAcceptComplete(self: *AsyncServer, res: i32, user_data: u64) void {
         self.submitAccept() catch |err| logErr("failed to resubmit accept: {s}", .{@errorName(err)});
         return;
     };
-    self.submitRead(conn_id, conn_ptr) catch |err| {
-        if (err == error.RingFull) {
-            // SQ ring is full; the connection was accepted but no read SQE
-            // could be submitted. Without a read, this connection will never
-            // receive data. Close it immediately rather than letting it idle
-            // until TTL timeout.
-            logErr("submitRead RingFull for new conn fd={d}, closing", .{conn_fd});
+
+    if (self.tls_config != null) {
+        self.initTlsStream(conn_ptr) catch |err| {
+            logErr("initTlsStream failed for fd {}: {s}", .{ conn_fd, @errorName(err) });
             self.closeConn(conn_id, conn_fd);
-        } else {
-            logErr("submitRead failed for fd {}: {s}", .{ conn_fd, @errorName(err) });
-            self.closeConn(conn_id, conn_fd);
-        }
-        self.accept_stalled = true;
-        self.submitAccept() catch |err2| logErr("failed to resubmit accept after read error: {s}", .{@errorName(err2)});
-        return;
-    };
+            self.accept_stalled = true;
+            self.submitAccept() catch |err2| logErr("failed to resubmit accept after tls error: {s}", .{@errorName(err2)});
+            return;
+        };
+        conn_ptr.state = .tls_handshaking;
+        self.submitRead(conn_id, conn_ptr) catch |err| {
+            if (err == error.RingFull) {
+                logErr("submitRead RingFull for new TLS conn fd={d}, closing", .{conn_fd});
+                self.closeConn(conn_id, conn_fd);
+            } else {
+                logErr("submitRead failed for TLS fd {}: {s}", .{ conn_fd, @errorName(err) });
+                self.closeConn(conn_id, conn_fd);
+            }
+            self.accept_stalled = true;
+            self.submitAccept() catch |err2| logErr("failed to resubmit accept after tls read error: {s}", .{@errorName(err2)});
+            return;
+        };
+    } else {
+        self.submitRead(conn_id, conn_ptr) catch |err| {
+            if (err == error.RingFull) {
+                logErr("submitRead RingFull for new conn fd={d}, closing", .{conn_fd});
+                self.closeConn(conn_id, conn_fd);
+            } else {
+                logErr("submitRead failed for fd {}: {s}", .{ conn_fd, @errorName(err) });
+                self.closeConn(conn_id, conn_fd);
+            }
+            self.accept_stalled = true;
+            self.submitAccept() catch |err2| logErr("failed to resubmit accept after read error: {s}", .{@errorName(err2)});
+            return;
+        };
+    }
     self.submitAccept() catch |err| {
         self.accept_stalled = true;
         logErr("failed to resubmit accept: {s}", .{@errorName(err)});

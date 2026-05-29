@@ -35,6 +35,11 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
     self.ws_server.removeActive(conn_id);
 
     if (getConn(self, conn_id)) |conn| {
+        if (conn.tls) |tls_stream| {
+            tls_stream.free();
+            self.allocator.destroy(tls_stream);
+            conn.tls = null;
+        }
         if (conn.ws_token) |t| {
             self.allocator.free(t);
             conn.ws_token = null;

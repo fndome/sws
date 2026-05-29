@@ -28,6 +28,8 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
+    const enable_tls = b.option(bool, "tls", "Enable BoringSSL TLS support") orelse false;
+
     const mod = b.addModule("sws", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -59,6 +61,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    if (enable_tls) {
+        exe.linkSystemLibrary2("ssl", .{});
+        exe.linkSystemLibrary2("crypto", .{});
+    }
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -82,6 +88,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(example_exe);
+    if (enable_tls) {
+        example_exe.linkSystemLibrary2("ssl", .{});
+        example_exe.linkSystemLibrary2("crypto", .{});
+    }
 
     const im_bench_exe = b.addExecutable(.{
         .name = "im-bench",
@@ -93,6 +103,10 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "sws", .module = mod }},
         }),
     });
+    if (enable_tls) {
+        im_bench_exe.linkSystemLibrary2("ssl", .{});
+        im_bench_exe.linkSystemLibrary2("crypto", .{});
+    }
     b.installArtifact(im_bench_exe);
 
     const run_im_bench = b.step("run-im-bench", "Run IM-scenario WebSocket benchmark");
@@ -132,6 +146,10 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
+    if (enable_tls) {
+        mod_tests.linkSystemLibrary2("ssl", .{});
+        mod_tests.linkSystemLibrary2("crypto", .{});
+    }
 
     // A run step that will run the test executable.
     const run_mod_tests = b.addRunArtifact(mod_tests);
@@ -142,6 +160,10 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
+    if (enable_tls) {
+        exe_tests.linkSystemLibrary2("ssl", .{});
+        exe_tests.linkSystemLibrary2("crypto", .{});
+    }
 
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);

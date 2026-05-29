@@ -6,6 +6,7 @@ const Connection = @import("connection.zig").Connection;
 const packUserData = @import("../stack_pool.zig").packUserData;
 const logErr = @import("http_helpers.zig").logErr;
 const milliTimestamp = @import("event_loop.zig").milliTimestamp;
+const TlsStream = @import("../tls/tls.zig").TlsStream;
 
 const maxWriteRetries = @import("http_response.zig").maxWriteRetries;
 
@@ -22,6 +23,11 @@ pub fn submitWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
         conn.write_start_ms = milliTimestamp(self.io);
         conn.write_retries = 0;
     }
+
+    if (conn.tls) |tls_stream| {
+        return submitTlsWrite(self, conn_id, conn, tls_stream);
+    }
+
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
     const fd = if (conn.fixed_index != 0xFFFF) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
 
@@ -98,6 +104,9 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
         return;
     }
     const conn = self.getConn(conn_id) orelse return;
+    if (conn.tls != null) {
+        return onTlsWriteComplete(self, conn_id, conn, res);
+    }
     conn.write_offset += @as(usize, @intCast(res));
     const total = conn.write_headers_len + if (conn.write_body) |b| b.len else 0;
     if (conn.write_offset >= total) {
@@ -159,5 +168,123 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
             }
             self.closeConn(conn_id, conn.fd);
         };
+    }
+}
+
+fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_stream: *TlsStream) !void {
+    _ = conn_id;
+    const user_data = packUserData(conn.gen_id, conn.pool_idx);
+    const fd = if (conn.fixed_index != 0xFFFF) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
+
+    const resp_buf = conn.response_buf orelse return;
+    const slot = &self.pool.slots[conn.pool_idx];
+
+    if (slot.line4.writev_in_flight != 0) {
+        return error.WriteInFlight;
+    }
+
+    const header_len = @min(conn.write_headers_len, resp_buf.len);
+
+    var ciphertext_buf: [16384]u8 = [_]u8{0} ** 16384;
+
+    if (conn.write_body) |body| {
+        const total = header_len + body.len;
+        if (conn.write_offset >= total) return;
+
+        var plaintext_buf: [16384]u8 = [_]u8{0} ** 16384;
+        var plaintext_offset: usize = 0;
+
+        if (conn.write_offset < header_len) {
+            const hdr_part = resp_buf[conn.write_offset..header_len];
+            @memcpy(plaintext_buf[plaintext_offset..][0..hdr_part.len], hdr_part);
+            plaintext_offset += hdr_part.len;
+        }
+
+        const body_start = if (conn.write_offset > header_len)
+            conn.write_offset - header_len
+        else
+            0;
+        if (body_start < body.len) {
+            const body_part = body[body_start..];
+            const to_copy = @min(body_part.len, plaintext_buf.len - plaintext_offset);
+            @memcpy(plaintext_buf[plaintext_offset..][0..to_copy], body_part[0..to_copy]);
+            plaintext_offset += to_copy;
+        }
+
+        const plaintext = plaintext_buf[0..plaintext_offset];
+        const ciphertext_len = tls_stream.write(plaintext, &ciphertext_buf) catch {
+            return error.TlsWriteFailed;
+        };
+        if (ciphertext_len == 0) return;
+
+        slot.line4.writev_in_flight = 1;
+        _ = self.ring.write(user_data, fd, ciphertext_buf[0..ciphertext_len], 0) catch {
+            slot.line4.writev_in_flight = 0;
+            try queuePendingWrite(self, conn_id, conn);
+            return;
+        };
+    } else {
+        if (conn.write_offset >= header_len) return;
+        const plaintext = resp_buf[conn.write_offset..header_len];
+        const to_encrypt = if (plaintext.len > 16384) plaintext[0..16384] else plaintext;
+        const ciphertext_len = tls_stream.write(to_encrypt, &ciphertext_buf) catch {
+            return error.TlsWriteFailed;
+        };
+        if (ciphertext_len == 0) return;
+
+        slot.line4.writev_in_flight = 1;
+        _ = self.ring.write(user_data, fd, ciphertext_buf[0..ciphertext_len], 0) catch {
+            slot.line4.writev_in_flight = 0;
+            try queuePendingWrite(self, conn_id, conn);
+            return;
+        };
+    }
+}
+
+fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, _: i32) void {
+    const header_len = if (conn.response_buf) |rb|
+        @min(conn.write_headers_len, rb.len)
+    else
+        0;
+    const body_len = if (conn.write_body) |b| b.len else 0;
+    const total = header_len + body_len;
+
+    conn.write_offset = total;
+
+    conn.write_retries = 0;
+    if (conn.pool_idx != 0xFFFFFFFF) {
+        self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+    }
+    if (conn.write_body) |b| {
+        self.allocator.free(b);
+        conn.write_body = null;
+    }
+    conn.write_start_ms = 0;
+    if (conn.response_buf) |buf| {
+        self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
+        conn.response_buf = null;
+    }
+    if (self.ws_server.getActive(conn_id) != null) {
+        conn.keep_alive = true;
+        conn.write_offset = 0;
+        conn.write_headers_len = 0;
+        conn.state = .ws_reading;
+        self.submitRead(conn_id, conn) catch |err| {
+            logErr("submitRead failed for WS upgrade fd {}: {s}", .{ conn.fd, @errorName(err) });
+            self.closeConn(conn_id, conn.fd);
+        };
+    } else if (conn.keep_alive) {
+        conn.write_start_ms = 0;
+        conn.state = .reading;
+        conn.read_len = 0;
+        conn.write_offset = 0;
+        conn.write_headers_len = 0;
+        conn.last_active_ms = milliTimestamp(self.io);
+        self.submitRead(conn_id, conn) catch |err| {
+            logErr("submitRead failed for keep-alive fd {}: {s}", .{ conn.fd, @errorName(err) });
+            self.closeConn(conn_id, conn.fd);
+        };
+    } else {
+        self.closeConn(conn_id, conn.fd);
     }
 }

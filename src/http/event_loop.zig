@@ -11,9 +11,12 @@ const ACCEPT_USER_DATA = @import("../constants.zig").ACCEPT_USER_DATA;
 const MAX_CQES_BATCH = @import("../constants.zig").MAX_CQES_BATCH;
 const USER_TASK_BATCH = @import("../constants.zig").USER_TASK_BATCH;
 const CLOSE_USER_DATA_FLAG = @import("../stack_pool.zig").CLOSE_USER_DATA_FLAG;
+const packUserData = @import("../stack_pool.zig").packUserData;
 const CLIENT_USER_DATA_FLAG = @import("../shared/io_registry.zig").CLIENT_USER_DATA_FLAG;
 const Item = @import("../next/queue.zig").Item;
 const IO_QUANTUM: usize = 64;
+const TlsStream = @import("../tls/tls.zig").TlsStream;
+const HandshakeStep = @import("../tls/tls.zig").HandshakeStep;
 
 pub fn milliTimestamp(io: std.Io) i64 {
     const ts = std.Io.Timestamp.now(io, .real);
@@ -183,6 +186,8 @@ pub fn dispatchCqes(self: *AsyncServer, cqes: []linux.io_uring_cqe, n: usize) vo
 
             if (conn_ptr.state == .reading or conn_ptr.state == .processing) {
                 self.onReadComplete(conn_id, res, user_data, cqe.flags);
+            } else if (conn_ptr.state == .tls_handshaking) {
+                self.onTlsHandshake(conn_id, conn_ptr, res, user_data, cqe.flags);
             } else if (conn_ptr.state == .receiving_body) {
                 self.onBodyChunk(conn_id, res);
             } else if (conn_ptr.state == .streaming) {
@@ -244,7 +249,7 @@ fn retryPendingWrites(self: *AsyncServer) void {
     while (i < count) : (i += 1) {
         const conn_id = self.pending_writes.items[i];
         if (getConn(self, conn_id)) |conn| {
-            if (conn.state == .writing or conn.state == .ws_writing) {
+            if (conn.state == .writing or conn.state == .ws_writing or conn.state == .tls_handshaking) {
                 self.submitWrite(conn_id, conn) catch |err| {
                     if (err != error.WriteInFlight) break;
                 };
@@ -292,4 +297,120 @@ pub fn drainTick(self: *AsyncServer) void {
     for (self.tick_hooks.items) |hook| {
         hook(self);
     }
+}
+
+fn onTlsHandshake(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32, user_data: u64, cqe_flags: u32) void {
+    _ = user_data;
+    const tls_stream = conn.tls orelse {
+        self.closeConn(conn_id, conn.fd);
+        return;
+    };
+
+    if (tls_stream.pending_handshake_write) {
+        tls_stream.pending_handshake_write = false;
+        if (res <= 0) {
+            self.closeConn(conn_id, conn.fd);
+            return;
+        }
+        conn.last_active_ms = milliTimestamp(self.io);
+        self.submitRead(conn_id, conn) catch |err| {
+            logErr("submitRead failed during TLS handshake: {s}", .{@errorName(err)});
+            self.closeConn(conn_id, conn.fd);
+        };
+        return;
+    }
+
+    if (res <= 0) {
+        if (cqe_flags & linux.IORING_CQE_F_BUFFER != 0) {
+            const bid = @as(u16, @truncate(cqe_flags >> 16));
+            self.buffer_pool.markReplenish(bid);
+        }
+        self.closeConn(conn_id, conn.fd);
+        return;
+    }
+
+    var ciphertext: []const u8 = &.{};
+    var bid: u16 = 0;
+    if (cqe_flags & linux.IORING_CQE_F_BUFFER != 0) {
+        bid = @as(u16, @truncate(cqe_flags >> 16));
+        ciphertext = self.buffer_pool.getReadBuf(bid)[0..@as(usize, @intCast(res))];
+    }
+
+    if (conn.read_len > 0 and conn.read_bid != 0 and conn.read_bid != bid) {
+        self.buffer_pool.markReplenish(conn.read_bid);
+    }
+    conn.read_bid = bid;
+    conn.read_len = ciphertext.len;
+
+    const step = tls_stream.handshakeAdvance(if (ciphertext.len > 0) ciphertext else null) catch {
+        if (bid != 0) {
+            self.buffer_pool.markReplenish(bid);
+            conn.read_bid = 0;
+            conn.read_len = 0;
+        }
+        logErr("TLS handshake failed for fd {}", .{conn.fd});
+        self.closeConn(conn_id, conn.fd);
+        return;
+    };
+
+    switch (step) {
+        .done => {
+            if (bid != 0) {
+                self.buffer_pool.markReplenish(bid);
+                conn.read_bid = 0;
+                conn.read_len = 0;
+            }
+            conn.state = .reading;
+            conn.last_active_ms = milliTimestamp(self.io);
+            self.submitRead(conn_id, conn) catch |err| {
+                logErr("submitRead after TLS handshake failed: {s}", .{@errorName(err)});
+                self.closeConn(conn_id, conn.fd);
+            };
+        },
+        .want_read => {
+            if (bid != 0) {
+                self.buffer_pool.markReplenish(bid);
+                conn.read_bid = 0;
+                conn.read_len = 0;
+            }
+            conn.last_active_ms = milliTimestamp(self.io);
+            self.submitRead(conn_id, conn) catch |err| {
+                logErr("submitRead during TLS handshake: {s}", .{@errorName(err)});
+                self.closeConn(conn_id, conn.fd);
+            };
+        },
+        .want_write => {
+            const handshake_out = tls_stream.handshakeOutput();
+            if (bid != 0) {
+                self.buffer_pool.markReplenish(bid);
+                conn.read_bid = 0;
+                conn.read_len = 0;
+            }
+            submitTlsHandshakeWrite(self, conn_id, conn, handshake_out) catch |err| {
+                logErr("submitTlsHandshakeWrite failed: {s}", .{@errorName(err)});
+                self.closeConn(conn_id, conn.fd);
+            };
+        },
+        .error => {
+            if (bid != 0) {
+                self.buffer_pool.markReplenish(bid);
+                conn.read_bid = 0;
+                conn.read_len = 0;
+            }
+            logErr("TLS handshake error for fd {}", .{conn.fd});
+            self.closeConn(conn_id, conn.fd);
+        },
+    }
+}
+
+fn submitTlsHandshakeWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, data: []const u8) !void {
+    _ = conn_id;
+    const tls_stream = conn.tls orelse return error.NoTlsStream;
+    const user_data = packUserData(conn.gen_id, conn.pool_idx);
+    const fd = if (conn.fixed_index != 0xFFFF) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
+    const sqe = self.ring.write(user_data, fd, data, 0) catch {
+        return error.RingFull;
+    };
+    if (conn.fixed_index != 0xFFFF) sqe.flags |= linux.IOSQE_FIXED_FILE;
+    tls_stream.pending_handshake_write = true;
 }

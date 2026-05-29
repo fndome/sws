@@ -19,6 +19,7 @@ const StackSlot = @import("../stack_pool.zig").StackSlot;
 const HttpWork = @import("../stack_pool.zig").HttpWork;
 const OVERSIZED_THRESHOLD = @import("../stack_pool.zig").OVERSIZED_THRESHOLD;
 const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
+const TlsStream = @import("../tls/tls.zig").TlsStream;
 const READ_BUF_GROUP_ID = @import("../constants.zig").READ_BUF_GROUP_ID;
 const MAX_BUFFERED_BODY_SIZE: u64 = 1024 * 1024;
 const MAX_REASSEMBLED_HEADER_SIZE: usize = BUFFER_SIZE * 2;
@@ -93,13 +94,46 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
     const read_buf = self.buffer_pool.getReadBuf(bid);
     const nread = @as(usize, @intCast(res));
 
-    var effective_buf: []const u8 = read_buf[0..nread];
-    var effective_nread = nread;
+    var plaintext_buf: [BUFFER_SIZE]u8 = [_]u8{0} ** BUFFER_SIZE;
+    var plaintext_len: usize = 0;
+    var tls_decrypted = false;
+
+    if (conn.tls) |tls_stream| {
+        const decrypted = tls_stream.read(read_buf[0..nread], &plaintext_buf) catch |err| {
+            if (err == error.TlsConnectionClosed) {
+                self.buffer_pool.markReplenish(bid);
+                conn.read_len = 0;
+                self.closeConn(conn_id, conn.fd);
+                return;
+            }
+            self.buffer_pool.markReplenish(bid);
+            conn.read_len = 0;
+            self.closeConn(conn_id, conn.fd);
+            return;
+        };
+        plaintext_len = decrypted;
+        if (decrypted == 0) {
+            self.buffer_pool.markReplenish(bid);
+            conn.read_bid = 0;
+            conn.read_len = 0;
+            self.submitRead(conn_id, conn) catch |err_sub| {
+                logErr("submitRead after TLS WANT_READ: {s}", .{@errorName(err_sub)});
+                self.closeConn(conn_id, conn.fd);
+            };
+            return;
+        }
+        self.buffer_pool.markReplenish(bid);
+        tls_decrypted = true;
+        bid = 0;
+    }
+
+    var effective_buf: []const u8 = if (tls_decrypted) plaintext_buf[0..plaintext_len] else read_buf[0..nread];
+    var effective_nread = if (tls_decrypted) plaintext_len else nread;
     var pending_to_free: u16 = 0;
     var reassembled_header = false;
     var combo: [MAX_REASSEMBLED_HEADER_SIZE]u8 = undefined;
 
-    if (conn.pool_idx != 0xFFFFFFFF) {
+    if (!tls_decrypted and conn.pool_idx != 0xFFFFFFFF) {
         const slot = &self.pool.slots[conn.pool_idx];
         const hw = sticker.httpWork(slot);
         if (hw.pending_len > 0 and (hw.pending_bid != 0 or slot.line3.pending_buffer_ptr != 0)) {
@@ -129,13 +163,15 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         }
     }
 
-    if (conn.read_len > 0 and conn.read_bid != pending_to_free) {
-        self.buffer_pool.markReplenish(conn.read_bid);
+    if (!tls_decrypted) {
+        if (conn.read_len > 0 and conn.read_bid != pending_to_free) {
+            self.buffer_pool.markReplenish(conn.read_bid);
+        }
+        if (pending_to_free != 0) {
+            self.buffer_pool.markReplenish(pending_to_free);
+        }
+        conn.read_bid = bid;
     }
-    if (pending_to_free != 0) {
-        self.buffer_pool.markReplenish(pending_to_free);
-    }
-    conn.read_bid = bid;
     conn.read_len = effective_nread;
 
     const has_header_end = std.mem.indexOf(u8, effective_buf, "\r\n\r\n") != null or

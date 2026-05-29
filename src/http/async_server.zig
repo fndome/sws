@@ -55,6 +55,14 @@ const hook_system = @import("hook_system.zig");
 const HttpTaskCtx = http_fiber.HttpTaskCtx;
 const WsTaskCtx = ws_fiber.WsTaskCtx;
 
+pub const TlsAuth = struct {
+    cert_path: [:0]const u8,
+    key_path: [:0]const u8,
+};
+
+const TlsConfig = @import("../tls/tls.zig").TlsConfig;
+const TlsStream = @import("../tls/tls.zig").TlsStream;
+
 const DeferredNode = hook_system.DeferredNode;
 const deferredRespond = hook_system.deferredRespond;
 
@@ -148,6 +156,8 @@ pub const AsyncServer = struct {
     /// SQ ring 溢出时暂存的写请求 (1M broadcast 场景的背压机制)
     pending_writes: std.ArrayList(u64),
 
+    tls_config: ?TlsConfig = null,
+
     worker_orig_cpu_mask: usize = 0,
 
     const Self = @This();
@@ -206,7 +216,7 @@ pub const AsyncServer = struct {
         }
     }
 
-    pub fn init(allocator: Allocator, io: std.Io, listen_addr: []const u8, app_ctx: ?*anyopaque, fiber_stack_size_kb: u16) !Self {
+    pub fn init(allocator: Allocator, io: std.Io, listen_addr: []const u8, app_ctx: ?*anyopaque, fiber_stack_size_kb: u16, tls_auth: ?TlsAuth) !Self {
         const colon = std.mem.indexOfScalar(u8, listen_addr, ':') orelse return error.InvalidListenAddress;
         const ip_str = listen_addr[0..colon];
         const port_str = listen_addr[colon + 1 ..];
@@ -240,6 +250,12 @@ pub const AsyncServer = struct {
             break :blk try linux.IoUring.init(RING_ENTRIES, 0);
         };
         errdefer ring.deinit();
+
+        var tls_config: ?TlsConfig = null;
+        if (tls_auth) |auth| {
+            tls_config = try TlsConfig.init(auth.cert_path, auth.key_path, true);
+        }
+        errdefer if (tls_config) |*tc| tc.deinit();
 
         const mw_store = MiddlewareStore{
             .global = std.ArrayList(Middleware).empty,
@@ -320,6 +336,7 @@ pub const AsyncServer = struct {
             .dns_resolver = dns_resolver,
             .ttl_scan_out = std.ArrayList(u32).initCapacity(allocator, 512) catch @panic("OOM"),
             .pending_writes = std.ArrayList(u64).empty,
+            .tls_config = tls_config,
         };
         server.rs = RingShared.bind(&server.ring, &server.io_registry);
 
@@ -352,6 +369,10 @@ pub const AsyncServer = struct {
             var it = self.connections.iterator();
             while (it.next()) |entry| {
                 const conn = entry.value_ptr;
+                if (conn.tls) |tls_stream| {
+                    tls_stream.free();
+                    self.allocator.destroy(tls_stream);
+                }
                 if (conn.write_body) |b| self.allocator.free(b);
                 if (conn.ws_token) |t| self.allocator.free(t);
                 if (conn.response_buf) |buf| self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
@@ -406,6 +427,7 @@ pub const AsyncServer = struct {
         self.ws_ctx_pool.deinit(self.allocator);
         self.allocator.free(self.shared_fiber_stack);
         self.pending_writes.deinit(self.allocator);
+        if (self.tls_config) |*tc| tc.deinit();
         if (self.logger) |l| l.deinit();
         self.cfg = undefined;
     }
@@ -532,6 +554,15 @@ pub const AsyncServer = struct {
 
     pub fn getConnToken(self: *Self, conn_id: u64) ?[]const u8 {
         return connection_mgr.getConnToken(self, conn_id);
+    }
+
+    pub fn initTlsStream(self: *Self, conn: *Connection) !void {
+        if (self.tls_config) |*tc| {
+            const tls_stream = try self.allocator.create(TlsStream);
+            errdefer self.allocator.destroy(tls_stream);
+            tls_stream.* = try TlsStream.new(tc);
+            conn.tls = tls_stream;
+        }
     }
 
     pub fn registerSubmitQueue(self: *Self, queue: *uring_submit.SubmitQueue) !void {

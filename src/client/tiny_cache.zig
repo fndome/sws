@@ -16,6 +16,7 @@ const MAX_CONNS_PER_HOST: usize = 12;
 const PoolEntry = struct {
     host: []u8,
     port: u16,
+    tls: bool,
     stream: *RingSharedClient,
     pipe: Pipe,
     last_used_ms: i64,
@@ -49,11 +50,12 @@ pub const TinyCache = struct {
     }
 
     /// 借出一条空闲连接到 host:port。返回 (stream, pipe) 或 null。
-    pub fn acquire(self: *TinyCache, host: []const u8, port: u16, now_ms: i64) ?struct { stream: *RingSharedClient, pipe: *Pipe } {
+    pub fn acquire(self: *TinyCache, host: []const u8, port: u16, tls: bool, now_ms: i64) ?struct { stream: *RingSharedClient, pipe: *Pipe } {
         if (!self.enabled()) return null;
         for (self.entries.items) |*e| {
             if (e.borrowed) continue;
             if (e.port != port) continue;
+            if (e.tls != tls) continue;
             // 修改原因：HTTP/DNS 主机名大小写不敏感，连接池复用也必须折叠大小写，避免同一上游重复建连。
             if (!sameHost(e.host, host)) continue;
             if (now_ms - e.last_used_ms >= self.ttl_ms) continue;
@@ -77,13 +79,13 @@ pub const TinyCache = struct {
     }
 
     /// 存入新连接到池。池满时返回 error.PoolFull。
-    pub fn store(self: *TinyCache, stream: *RingSharedClient, p: Pipe, host: []const u8, port: u16, now_ms: i64) !void {
+    pub fn store(self: *TinyCache, stream: *RingSharedClient, p: Pipe, host: []const u8, port: u16, tls: bool, now_ms: i64) !void {
         if (!self.enabled()) {
             // 修改原因：store 失败时调用方仍负责释放 stream/pipe；这里提前 deinit 会和调用方 catch 路径 double-free。
             return error.CacheDisabled;
         }
         self.evictExpired(now_ms);
-        if (self.countForHostPort(host, port) >= MAX_CONNS_PER_HOST) {
+        if (self.countForHostPort(host, port, tls) >= MAX_CONNS_PER_HOST) {
             // 修改原因：上限语义是同一 host:port 的并发连接数，不能让其他上游占满全局池导致误报 PoolFull。
             return error.PoolFull;
         }
@@ -94,6 +96,7 @@ pub const TinyCache = struct {
         try self.entries.append(.{
             .host = host_dup,
             .port = port,
+            .tls = tls,
             .stream = stream,
             .pipe = p,
             .last_used_ms = now_ms,
@@ -156,10 +159,10 @@ pub const TinyCache = struct {
         }
     }
 
-    fn countForHostPort(self: *const TinyCache, host: []const u8, port: u16) usize {
+    fn countForHostPort(self: *const TinyCache, host: []const u8, port: u16, tls: bool) usize {
         var n: usize = 0;
         for (self.entries.items) |e| {
-            if (e.port == port and sameHost(e.host, host)) n += 1;
+            if (e.port == port and e.tls == tls and sameHost(e.host, host)) n += 1;
         }
         return n;
     }
@@ -202,6 +205,7 @@ test "TinyCache.store keeps stream ownership with caller on PoolFull" {
         try cache.entries.append(.{
             .host = host,
             .port = 80,
+            .tls = false,
             .stream = fake_stream,
             .pipe = testPipe(fake_stream),
             .last_used_ms = 0,
@@ -209,7 +213,7 @@ test "TinyCache.store keeps stream ownership with caller on PoolFull" {
         });
     }
 
-    try std.testing.expectError(error.PoolFull, cache.store(fake_stream, testPipe(fake_stream), "same.test", 80, 0));
+    try std.testing.expectError(error.PoolFull, cache.store(fake_stream, testPipe(fake_stream), "same.test", 80, false, 0));
 }
 
 test "TinyCache.store applies pool limit per host and port" {
@@ -227,6 +231,7 @@ test "TinyCache.store applies pool limit per host and port" {
         try cache.entries.append(.{
             .host = host,
             .port = 80,
+            .tls = false,
             .stream = fake_stream,
             .pipe = testPipe(fake_stream),
             .last_used_ms = 0,
@@ -234,7 +239,7 @@ test "TinyCache.store applies pool limit per host and port" {
         });
     }
 
-    try cache.store(fake_stream, testPipe(fake_stream), "extra.test", 80, 0);
+    try cache.store(fake_stream, testPipe(fake_stream), "extra.test", 80, false, 0);
     try std.testing.expectEqual(MAX_CONNS_PER_HOST + 1, cache.entries.items.len);
 }
 
@@ -252,13 +257,14 @@ test "TinyCache.acquire matches host case-insensitively" {
     try cache.entries.append(.{
         .host = host,
         .port = 80,
+        .tls = false,
         .stream = fake_stream,
         .pipe = testPipe(fake_stream),
         .last_used_ms = 0,
         .borrowed = false,
     });
 
-    const borrowed = cache.acquire("example.com", 80, 1) orelse {
+    const borrowed = cache.acquire("example.com", 80, false, 1) orelse {
         try std.testing.expect(false);
         return;
     };

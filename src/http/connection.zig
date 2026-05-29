@@ -1,17 +1,16 @@
 const std = @import("std");
+const TlsStream = @import("../tls/tls.zig").TlsStream;
 
 pub const ConnState = enum(u8) {
     reading,
-    /// 接收超大 body（>32KB），走显式 buffer 逐块收
     receiving_body,
     processing,
     writing,
     closing,
+    tls_handshaking,
     ws_reading,
     ws_writing,
-    /// Worker Pool 正在解析大报文，IO 线程挂起等待
     waiting_computation,
-    /// ChunkStream 流式搬运：IO 线程 copy → Worker 解析
     streaming,
 };
 
@@ -51,6 +50,7 @@ pub const Connection = struct {
     gen_id: u32 = 0,
     /// Position in pool.live list (for O(1) swap-remove)
     active_list_pos: u32 = 0xFFFFFFFF,
+    tls: ?*TlsStream = null,
 };
 
 /// WebSocket 写队列节点（单 IO 线程，无需原子操作）

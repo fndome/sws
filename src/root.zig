@@ -40,6 +40,9 @@ pub const TinyCache = @import("client/tiny_cache.zig").TinyCache;
 pub const StackSlot = @import("stack_pool.zig").StackSlot;
 pub const LargeBufferPool = @import("shared/large_buffer_pool.zig").LargeBufferPool;
 pub const OVERSIZED_THRESHOLD = @import("stack_pool.zig").OVERSIZED_THRESHOLD;
+pub const TlsConfig = @import("tls/tls.zig").TlsConfig;
+pub const TlsStream = @import("tls/tls.zig").TlsStream;
+pub const TlsAuth = @import("http/async_server.zig").TlsAuth;
 
 pub const CustomTemplate = struct {
     pub fn createAndRegister(server: *AsyncServer) !*SubmitQueue {

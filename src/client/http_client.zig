@@ -5,6 +5,7 @@ const RingB = @import("ring.zig").RingB;
 const RingSharedClient = @import("../shared/tcp_stream.zig").RingSharedClient;
 const TinyCache = @import("tiny_cache.zig").TinyCache;
 const Pipe = @import("../next/pipe.zig").Pipe;
+const TlsConfig = @import("../tls/tls.zig").TlsConfig;
 const Fiber = @import("../next/fiber.zig").Fiber;
 
 pub const Response = struct {
@@ -24,6 +25,7 @@ const ParsedUrl = struct {
     authority: []const u8,
     port: u16,
     path: []const u8,
+    tls: bool,
 };
 
 fn isHttpTokenChar(ch: u8) bool {
@@ -86,8 +88,13 @@ fn stripFragmentTarget(target: []const u8) []const u8 {
 fn parseUrl(allocator: Allocator, url: []const u8) !ParsedUrl {
     var rest = url;
     // 修改原因：URL scheme 大小写不敏感，HTTP://host 这类合法 URL 不能被误判成坏 host/port。
-    if (std.ascii.startsWithIgnoreCase(rest, "https://")) return error.TlsNotSupported;
-    if (std.ascii.startsWithIgnoreCase(rest, "http://")) rest = rest["http://".len..];
+    const is_tls = if (std.ascii.startsWithIgnoreCase(rest, "https://")) blk: {
+        rest = rest["https://".len..];
+        break :blk true;
+    } else if (std.ascii.startsWithIgnoreCase(rest, "http://")) blk: {
+        rest = rest["http://".len..];
+        break :blk false;
+    } else false;
     // 修改原因：合法 URL 可以省略路径但直接带 query，例如 http://host?x=1；此时也必须从 host 中切出去。
     const path_start = firstPathOrQueryIndex(rest);
     const host_port = if (path_start) |p| rest[0..p] else rest;
@@ -104,12 +111,12 @@ fn parseUrl(allocator: Allocator, url: []const u8) !ParsedUrl {
         // 修改原因：显式端口写错时不能静默回退到 80，否则请求会发到错误上游。
         if (port_text.len == 0) return error.InvalidUrl;
         break :blk std.fmt.parseInt(u16, port_text, 10) catch return error.InvalidUrl;
-    } else 80;
+    } else if (is_tls) 443 else 80;
     const host_dup = try allocator.dupe(u8, host);
     errdefer allocator.free(host_dup);
     // 修改原因：HTTP/1.1 Host 必须保留显式端口；连接用 host，Host 头用 authority。
     const authority_dup = try allocator.dupe(u8, host_port);
-    return .{ .host = host_dup, .authority = authority_dup, .port = port, .path = path };
+    return .{ .host = host_dup, .authority = authority_dup, .port = port, .path = path, .tls = is_tls };
 }
 
 fn parseResponse(allocator: Allocator, data: []const u8) !Response {
@@ -385,6 +392,7 @@ pub const HttpClient = struct {
     next_gen: u64,
     stop: bool,
     thread: ?std.Thread = null,
+    tls_client_config: ?TlsConfig = null,
 
     const REQUEST_TIMEOUT_MS: i64 = 5000;
 
@@ -403,6 +411,12 @@ pub const HttpClient = struct {
             .stop = false,
         };
         return self;
+    }
+
+    pub fn enableTls(self: *HttpClient) !void {
+        if (self.tls_client_config == null) {
+            self.tls_client_config = try TlsConfig.init(null, null, false);
+        }
     }
 
     fn lockPool(self: *HttpClient) void {
@@ -438,6 +452,7 @@ pub const HttpClient = struct {
                 @atomicStore(bool, &ctx.done, true, .release);
             }
         }
+        if (self.tls_client_config) |*tc| tc.deinit();
         self.allocator.destroy(self);
     }
 
@@ -735,7 +750,7 @@ fn httpRequestFiber(user_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []c
     var stream: *RingSharedClient = undefined;
     var pipe: *Pipe = undefined;
 
-    if (cache.acquire(parsed.host, parsed.port, now)) |borrowed| {
+    if (cache.acquire(parsed.host, parsed.port, parsed.tls, now)) |borrowed| {
         stream = borrowed.stream;
         pipe = borrowed.pipe;
     } else {
@@ -782,13 +797,38 @@ fn httpRequestFiber(user_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []c
             ctx.notify();
             return;
         }
+        if (parsed.tls) {
+            if (client.tls_client_config) |*tc| {
+                stream.startTls(tc) catch {
+                    stream.deinit();
+                    ctx.response = makeErrorResponse(ctx.allocator, 502, "TLS handshake failed");
+                    ctx.notify();
+                    return;
+                };
+            } else {
+                client.enableTls() catch {
+                    stream.deinit();
+                    ctx.response = makeErrorResponse(ctx.allocator, 502, "TLS init failed");
+                    ctx.notify();
+                    return;
+                };
+                if (client.tls_client_config) |*tc| {
+                    stream.startTls(tc) catch {
+                        stream.deinit();
+                        ctx.response = makeErrorResponse(ctx.allocator, 502, "TLS handshake failed");
+                        ctx.notify();
+                        return;
+                    };
+                }
+            }
+        }
         var new_pipe = Pipe.init(ctx.allocator, stream) catch {
             stream.deinit();
             ctx.response = makeErrorResponse(ctx.allocator, 502, "pipe init failed");
             ctx.notify();
             return;
         };
-        cache.store(stream, new_pipe, parsed.host, parsed.port, now) catch |err| {
+        cache.store(stream, new_pipe, parsed.host, parsed.port, parsed.tls, now) catch |err| {
             new_pipe.deinit();
             stream.deinit();
             switch (err) {
@@ -799,7 +839,7 @@ fn httpRequestFiber(user_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []c
             ctx.notify();
             return;
         };
-        const borrowed = cache.acquire(parsed.host, parsed.port, now) orelse {
+        const borrowed = cache.acquire(parsed.host, parsed.port, parsed.tls, now) orelse {
             ctx.response = makeErrorResponse(ctx.allocator, 502, "connection cache failed");
             ctx.notify();
             return;
@@ -1109,7 +1149,13 @@ test "HttpClient parseUrl rejects malformed explicit ports" {
     try std.testing.expectEqualStrings("example.com", parsed_upper_scheme.authority);
     try std.testing.expectEqualStrings("/upper", parsed_upper_scheme.path);
 
-    try std.testing.expectError(error.TlsNotSupported, parseUrl(std.testing.allocator, "HTTPS://example.com/"));
+    const parsed_https = try parseUrl(std.testing.allocator, "HTTPS://example.com/");
+    defer std.testing.allocator.free(parsed_https.host);
+    defer std.testing.allocator.free(parsed_https.authority);
+    try std.testing.expectEqualStrings("example.com", parsed_https.host);
+    try std.testing.expectEqualStrings("/", parsed_https.path);
+    try std.testing.expect(parsed_https.tls);
+    try std.testing.expectEqual(@as(u16, 443), parsed_https.port);
 
     const parsed_query = try parseUrl(std.testing.allocator, "http://example.com?x=1");
     defer std.testing.allocator.free(parsed_query.host);

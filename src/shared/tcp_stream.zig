@@ -4,6 +4,8 @@ const Allocator = std.mem.Allocator;
 
 const RingShared = @import("ring_shared.zig").RingShared;
 const DnsResolver = @import("../dns/resolver.zig").DnsResolver;
+const TlsStream = @import("../tls/tls.zig").TlsStream;
+const HandshakeStep = @import("../tls/tls.zig").HandshakeStep;
 
 pub const CLIENT_READ_BUF = 16384;
 const CLIENT_WRITE_USER_DATA_FLAG: u64 = 1 << 61;
@@ -42,6 +44,8 @@ pub const RingSharedClient = struct {
 
     dns: ?*DnsResolver,
     fixed_index: u16 = 0xFFFF,
+    tls: ?*TlsStream = null,
+    tls_handshaking: bool = false,
 
     pub const State = enum(u8) {
         idle,
@@ -81,6 +85,11 @@ pub const RingSharedClient = struct {
     }
 
     pub fn deinit(self: *RingSharedClient) void {
+        if (self.tls) |tls_stream| {
+            tls_stream.free();
+            self.allocator.destroy(tls_stream);
+            self.tls = null;
+        }
         if (self.id != 0) {
             self.rs.remove(self.id);
         }
@@ -186,11 +195,31 @@ pub const RingSharedClient = struct {
 
     pub fn write(self: *RingSharedClient, data: []const u8) !void {
         if (self.state == .connecting) {
-            // 修改原因：connectRawTimeout 只提交异步 connect；HTTP client 会先写请求，必须排队等 connect CQE 成功后发送。
             try self.write_buf.appendSlice(self.allocator, data);
             return;
         }
         if (self.state != .connected) return error.NotConnected;
+        if (self.tls != null) {
+            return self.writeTls(data);
+        }
+        try self.write_buf.appendSlice(self.allocator, data);
+        if (!self.writing) {
+            try self.flushWrite();
+        }
+    }
+
+    fn writeTls(self: *RingSharedClient, data: []const u8) !void {
+        const tls_stream = self.tls orelse return error.NotConnected;
+        var ciphertext_buf: [CLIENT_READ_BUF]u8 = [_]u8{0} ** CLIENT_READ_BUF;
+        const ciphertext_len = tls_stream.write(data, &ciphertext_buf) catch return error.TlsWriteFailed;
+        if (ciphertext_len == 0) return;
+        try self.write_buf.appendSlice(self.allocator, ciphertext_buf[0..ciphertext_len]);
+        if (!self.writing) {
+            try self.flushWrite();
+        }
+    }
+
+    fn writeRawTls(self: *RingSharedClient, data: []const u8) !void {
         try self.write_buf.appendSlice(self.allocator, data);
         if (!self.writing) {
             try self.flushWrite();
@@ -225,6 +254,50 @@ pub const RingSharedClient = struct {
     pub fn close(self: *RingSharedClient) void {
         if (self.state == .closing or self.state == .closed) return;
         self.state = .closing;
+    }
+
+    pub fn startTls(self: *RingSharedClient, tls_config: *const @import("../tls/tls.zig").TlsConfig) !void {
+        const tls_stream = try self.allocator.create(TlsStream);
+        errdefer self.allocator.destroy(tls_stream);
+        tls_stream.* = try TlsStream.new(tls_config);
+        self.tls = tls_stream;
+        self.tls_handshaking = true;
+
+        const step = tls_stream.handshakeAdvance(null) catch {
+            self.allocator.destroy(tls_stream);
+            self.tls = null;
+            self.tls_handshaking = false;
+            return error.TlsHandshakeFailed;
+        };
+
+        switch (step) {
+            .want_write => {
+                const handshake_out = tls_stream.handshakeOutput();
+                self.writeRawTls(handshake_out) catch {
+                    self.allocator.destroy(tls_stream);
+                    self.tls = null;
+                    self.tls_handshaking = false;
+                    return error.TlsHandshakeFailed;
+                };
+            },
+            .want_read => {
+                self.submitRead() catch {
+                    self.allocator.destroy(tls_stream);
+                    self.tls = null;
+                    self.tls_handshaking = false;
+                    return error.TlsHandshakeFailed;
+                };
+            },
+            .done => {
+                self.tls_handshaking = false;
+            },
+            .error => {
+                self.allocator.destroy(tls_stream);
+                self.tls = null;
+                self.tls_handshaking = false;
+                return error.TlsHandshakeFailed;
+            },
+        }
     }
 
     pub fn dispatchCqe(self: *RingSharedClient, cqe: *const linux.io_uring_cqe) void {
@@ -271,13 +344,40 @@ pub const RingSharedClient = struct {
                 }
                 if (isWriteCqe(user_data)) {
                     if (res == 0) {
-                        // 修改原因：非空 write 返回 0 表示没有写入进展，继续 flush 会重复提交同一段缓冲并卡住。
                         self.onClose();
                         return;
                     }
-                    // 修改原因：keep-alive 复用时旧 read CQE 可能在新 write 之后返回；
-                    // 只有带写标记的 CQE 才能推进 write_offset，避免把 read 完成误当写完成。
                     self.write_offset += @intCast(res);
+                    if (self.tls_handshaking) {
+                        if (self.tls) |tls_stream| {
+                            const step = tls_stream.handshakeAdvance(null) catch {
+                                self.onClose();
+                                return;
+                            };
+                            switch (step) {
+                                .done => {
+                                    self.tls_handshaking = false;
+                                },
+                                .want_write => {
+                                    const handshake_out = tls_stream.handshakeOutput();
+                                    self.writeRawTls(handshake_out) catch {
+                                        self.onClose();
+                                    };
+                                    return;
+                                },
+                                .want_read => {
+                                    self.submitRead() catch {
+                                        self.onClose();
+                                    };
+                                    return;
+                                },
+                                .error => {
+                                    self.onClose();
+                                    return;
+                                },
+                            }
+                        }
+                    }
                     self.flushWrite() catch {
                         self.onClose();
                     };
@@ -286,7 +386,49 @@ pub const RingSharedClient = struct {
                         self.onClose();
                         return;
                     }
-                    self.on_data(self, self.callback_ctx, self.read_buf[0..@intCast(res)]);
+                    const raw_read = self.read_buf[0..@intCast(res)];
+                    if (self.tls_handshaking) {
+                        if (self.tls) |tls_stream| {
+                            const step = tls_stream.handshakeAdvance(raw_read) catch {
+                                self.onClose();
+                                return;
+                            };
+                            switch (step) {
+                                .done => {
+                                    self.tls_handshaking = false;
+                                },
+                                .want_write => {
+                                    const handshake_out = tls_stream.handshakeOutput();
+                                    self.writeRawTls(handshake_out) catch {
+                                        self.onClose();
+                                    };
+                                    return;
+                                },
+                                .want_read => {
+                                    self.submitRead() catch {
+                                        self.onClose();
+                                    };
+                                    return;
+                                },
+                                .error => {
+                                    self.onClose();
+                                    return;
+                                },
+                            }
+                        }
+                    }
+                    if (self.tls) |tls_stream| {
+                        var plaintext_buf: [CLIENT_READ_BUF]u8 = [_]u8{0} ** CLIENT_READ_BUF;
+                        const decrypted = tls_stream.read(raw_read, &plaintext_buf) catch {
+                            self.onClose();
+                            return;
+                        };
+                        if (decrypted > 0) {
+                            self.on_data(self, self.callback_ctx, plaintext_buf[0..decrypted]);
+                        }
+                    } else {
+                        self.on_data(self, self.callback_ctx, raw_read);
+                    }
                     if (self.state != .connected) return;
                     if (!self.writing) {
                         self.submitRead() catch {

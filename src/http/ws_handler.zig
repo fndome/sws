@@ -15,6 +15,8 @@ const Fiber = @import("../next/fiber.zig").Fiber;
 const ws_fiber = @import("ws_fiber.zig");
 const logErr = helpers.logErr;
 const milliTimestamp = @import("event_loop.zig").milliTimestamp;
+const TlsStream = @import("../tls/tls.zig").TlsStream;
+const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
 const MAX_WS_ACCUMULATED_FRAME_SIZE: usize = 1024 * 1024;
 
 fn wsFrameInput(allocator: Allocator, conn: *Connection, data: []u8, owned_out: *?[]u8) ![]u8 {
@@ -46,7 +48,7 @@ fn storeIncompleteWsFrame(allocator: Allocator, conn: *Connection, data: []u8, o
 
 fn finishSynchronousWsHandler(self: *AsyncServer, conn_id: u64, conn: *Connection, bid: u16) void {
     // 修改原因：同步兜底 handler 使用的 payload 可能还指向 read buffer，必须等 handler 返回后再归还 bid。
-    self.buffer_pool.markReplenish(bid);
+    if (bid > 0) self.buffer_pool.markReplenish(bid);
     conn.read_buf_recycled = true;
     conn.read_len = 0;
     if (conn.state != .ws_writing) {
@@ -151,12 +153,44 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
     const read_buf = self.buffer_pool.getReadBuf(bid);
     const nread = @as(usize, @intCast(res));
 
-    if (conn.read_len > 0) self.buffer_pool.markReplenish(conn.read_bid);
-    conn.read_bid = bid;
-    conn.read_len = nread;
+    var plaintext_buf: [BUFFER_SIZE]u8 = [_]u8{0} ** BUFFER_SIZE;
+    var effective_buf: []u8 = undefined;
+    var effective_nread = nread;
+    var tls_decrypted = false;
+
+    if (conn.tls) |tls_stream| {
+        const decrypted = tls_stream.read(read_buf[0..nread], &plaintext_buf) catch {
+            self.buffer_pool.markReplenish(bid);
+            conn.read_len = 0;
+            self.closeConn(conn_id, conn.fd);
+            return;
+        };
+        if (decrypted == 0) {
+            self.buffer_pool.markReplenish(bid);
+            conn.read_bid = 0;
+            conn.read_len = 0;
+            self.submitRead(conn_id, conn) catch {
+                self.closeConn(conn_id, conn.fd);
+            };
+            return;
+        }
+        self.buffer_pool.markReplenish(bid);
+        effective_buf = plaintext_buf[0..decrypted];
+        effective_nread = decrypted;
+        tls_decrypted = true;
+        bid = 0;
+    } else {
+        effective_buf = @constCast(read_buf[0..nread]);
+    }
+
+    if (!tls_decrypted) {
+        if (conn.read_len > 0) self.buffer_pool.markReplenish(conn.read_bid);
+        conn.read_bid = bid;
+    }
+    conn.read_len = effective_nread;
     var owned_frame_input: ?[]u8 = null;
     defer if (owned_frame_input) |buf| self.allocator.free(buf);
-    const frame_input = wsFrameInput(self.allocator, conn, read_buf[0..nread], &owned_frame_input) catch {
+    const frame_input = wsFrameInput(self.allocator, conn, effective_buf[0..effective_nread], &owned_frame_input) catch {
         self.buffer_pool.markReplenish(bid);
         conn.read_len = 0;
         self.closeConn(conn_id, conn.fd);
