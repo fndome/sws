@@ -9,15 +9,16 @@ pub const output_buffer_len = 16469;
 
 pub const Cipher = struct {};
 
-pub const CertKeyPair = struct {
+const CertKeyPairType = struct {
     pub fn fromFilePathAbsolute(_: anytype, _: anytype, _: []const u8, _: []const u8) !@This() {
         return .{};
     }
     pub fn deinit(_: *@This(), _: anytype) void {}
 };
+pub const CertKeyPair = CertKeyPairType;
 
 pub const config = struct {
-    pub const CertKeyPair = @This().CertKeyPair;
+    pub const CertKeyPair = CertKeyPairType;
 
     pub const cert = struct {
         pub const Bundle = struct {
