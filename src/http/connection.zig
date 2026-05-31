@@ -35,6 +35,7 @@ pub const Connection = struct {
     ws_token: ?[]const u8 = null,
     ws_partial: ?[]u8 = null,
     write_retries: u8 = 0,
+    tls_write_len: u32 = 0,
     /// 读 buffer 是否已归还 io_uring provided buffer pool（防止二次回收）
     read_buf_recycled: bool = false,
     /// 写 buffer (write_body + response_buf) 是否已在 close 路径释放（防止 double-free）

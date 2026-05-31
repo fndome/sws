@@ -226,6 +226,7 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
             try queuePendingWrite(self, conn_id, conn);
             return;
         };
+        conn.tls_write_len = @intCast(ciphertext_len);
     } else {
         if (conn.write_offset >= header_len) return;
         const plaintext = resp_buf[conn.write_offset..header_len];
@@ -241,6 +242,7 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
             try queuePendingWrite(self, conn_id, conn);
             return;
         };
+        conn.tls_write_len = @intCast(ciphertext_len);
     }
 }
 
@@ -252,6 +254,16 @@ fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: 
         self.closeConn(conn_id, conn.fd);
         return;
     }
+
+    if (conn.tls_write_len > 0 and @as(u32, @intCast(res)) != conn.tls_write_len) {
+        if (conn.pool_idx != 0xFFFFFFFF) {
+            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+        }
+        conn.tls_write_len = 0;
+        self.closeConn(conn_id, conn.fd);
+        return;
+    }
+    conn.tls_write_len = 0;
 
     const header_len = if (conn.response_buf) |rb|
         @min(conn.write_headers_len, rb.len)
