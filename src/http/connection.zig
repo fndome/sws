@@ -1,13 +1,24 @@
 const std = @import("std");
-const TlsStream = @import("../tls/tls.zig").TlsStream;
+const build_options = @import("build_options");
+const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else opaque {};
 
-pub const ConnState = enum(u8) {
+pub const ConnState = if (build_options.tls_enabled) enum(u8) {
     reading,
     receiving_body,
     processing,
     writing,
     closing,
     tls_handshaking,
+    ws_reading,
+    ws_writing,
+    waiting_computation,
+    streaming,
+} else enum(u8) {
+    reading,
+    receiving_body,
+    processing,
+    writing,
+    closing,
     ws_reading,
     ws_writing,
     waiting_computation,
@@ -35,7 +46,6 @@ pub const Connection = struct {
     ws_token: ?[]const u8 = null,
     ws_partial: ?[]u8 = null,
     write_retries: u8 = 0,
-    tls_write_len: u32 = 0,
     /// 读 buffer 是否已归还 io_uring provided buffer pool（防止二次回收）
     read_buf_recycled: bool = false,
     /// 写 buffer (write_body + response_buf) 是否已在 close 路径释放（防止 double-free）
@@ -51,7 +61,10 @@ pub const Connection = struct {
     gen_id: u32 = 0,
     /// Position in pool.live list (for O(1) swap-remove)
     active_list_pos: u32 = 0xFFFFFFFF,
-    tls: ?*TlsStream = null,
+    pub usingnamespace if (build_options.tls_enabled) struct {
+        tls: ?*TlsStream = null,
+        tls_write_len: u32 = 0,
+    } else struct {};
 };
 
 /// WebSocket 写队列节点（单 IO 线程，无需原子操作）

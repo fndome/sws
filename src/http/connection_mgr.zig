@@ -1,5 +1,6 @@
 const std = @import("std");
 const linux = std.os.linux;
+const build_options = @import("build_options");
 
 const AsyncServer = @import("async_server.zig").AsyncServer;
 const Connection = @import("connection.zig").Connection;
@@ -35,10 +36,12 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
     self.ws_server.removeActive(conn_id);
 
     if (getConn(self, conn_id)) |conn| {
-        if (conn.tls) |tls_stream| {
-            tls_stream.free();
-            self.allocator.destroy(tls_stream);
-            conn.tls = null;
+        if (build_options.tls_enabled) {
+            if (conn.tls) |tls_stream| {
+                tls_stream.free();
+                self.allocator.destroy(tls_stream);
+                conn.tls = null;
+            }
         }
         if (conn.ws_token) |t| {
             self.allocator.free(t);

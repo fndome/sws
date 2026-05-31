@@ -17,7 +17,16 @@ pub fn build(b: *std.Build) void {
     });
     if (tls_dep) |dep| {
         mod.addImport("tls", dep.module("tls"));
+    } else {
+        const tls_noop = b.addModule("tls-noop", .{
+            .root_source_file = b.path("src/tls/noop.zig"),
+        });
+        mod.addImport("tls", tls_noop);
     }
+
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "tls_enabled", enable_tls);
+    mod.addOptions("build_options", build_options);
 
     const exe = b.addExecutable(.{
         .name = "sws",
@@ -34,6 +43,7 @@ pub fn build(b: *std.Build) void {
     if (tls_dep) |dep| {
         exe.root_module.addImport("tls", dep.module("tls"));
     }
+    exe.root_module.addOptions("build_options", build_options);
 
     b.installArtifact(exe);
 
@@ -50,6 +60,7 @@ pub fn build(b: *std.Build) void {
     if (tls_dep) |dep| {
         example_exe.root_module.addImport("tls", dep.module("tls"));
     }
+    example_exe.root_module.addOptions("build_options", build_options);
     b.installArtifact(example_exe);
 
     const im_bench_exe = b.addExecutable(.{
@@ -65,6 +76,7 @@ pub fn build(b: *std.Build) void {
     if (tls_dep) |dep| {
         im_bench_exe.root_module.addImport("tls", dep.module("tls"));
     }
+    im_bench_exe.root_module.addOptions("build_options", build_options);
     b.installArtifact(im_bench_exe);
 
     const run_im_bench = b.step("run-im-bench", "Run IM-scenario WebSocket benchmark");
@@ -91,7 +103,7 @@ pub fn build(b: *std.Build) void {
     if (tls_dep) |dep| {
         mod_tests.root_module.addImport("tls", dep.module("tls"));
     }
-    const run_mod_tests = b.addRunArtifact(mod_tests);
+    mod_tests.root_module.addOptions("build_options", build_options);
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,

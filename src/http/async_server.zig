@@ -54,14 +54,17 @@ const tcp_write = @import("tcp_write.zig");
 const hook_system = @import("hook_system.zig");
 const HttpTaskCtx = http_fiber.HttpTaskCtx;
 const WsTaskCtx = ws_fiber.WsTaskCtx;
+const build_options = @import("build_options");
 
 pub const TlsAuth = struct {
     cert_path: [:0]const u8,
     key_path: [:0]const u8,
 };
 
-const TlsConfig = @import("../tls/tls.zig").TlsConfig;
-const TlsStream = @import("../tls/tls.zig").TlsStream;
+if (build_options.tls_enabled) {
+    const TlsConfig = @import("../tls/tls.zig").TlsConfig;
+    const TlsStream = @import("../tls/tls.zig").TlsStream;
+}
 
 const DeferredNode = hook_system.DeferredNode;
 const deferredRespond = hook_system.deferredRespond;
@@ -156,7 +159,9 @@ pub const AsyncServer = struct {
     /// SQ ring 溢出时暂存的写请求 (1M broadcast 场景的背压机制)
     pending_writes: std.ArrayList(u64),
 
-    tls_config: ?TlsConfig = null,
+    pub usingnamespace if (build_options.tls_enabled) struct {
+        tls_config: ?TlsConfig = null,
+    } else struct {};
 
     worker_orig_cpu_mask: usize = 0,
 
@@ -251,11 +256,15 @@ pub const AsyncServer = struct {
         };
         errdefer ring.deinit();
 
-        var tls_config: ?TlsConfig = null;
-        if (tls_auth) |auth| {
-            tls_config = try TlsConfig.init(allocator, auth.cert_path, auth.key_path, true);
+        var tls_config: if (build_options.tls_enabled) ?TlsConfig else void = if (build_options.tls_enabled) null else {};
+        if (build_options.tls_enabled) {
+            if (tls_auth) |auth| {
+                tls_config = try TlsConfig.init(allocator, auth.cert_path, auth.key_path, true);
+            }
         }
-        errdefer if (tls_config) |*tc| tc.deinit();
+        errdefer if (build_options.tls_enabled) {
+            if (tls_config) |*tc| tc.deinit();
+        };
 
         const mw_store = MiddlewareStore{
             .global = std.ArrayList(Middleware).empty,
@@ -336,8 +345,10 @@ pub const AsyncServer = struct {
             .dns_resolver = dns_resolver,
             .ttl_scan_out = std.ArrayList(u32).initCapacity(allocator, 512) catch @panic("OOM"),
             .pending_writes = std.ArrayList(u64).empty,
-            .tls_config = tls_config,
         };
+        if (build_options.tls_enabled) {
+            server.tls_config = tls_config;
+        }
         server.rs = RingShared.bind(&server.ring, &server.io_registry);
 
         try server.buffer_pool.provideAllReads(&server.ring);
@@ -369,9 +380,11 @@ pub const AsyncServer = struct {
             var it = self.connections.iterator();
             while (it.next()) |entry| {
                 const conn = entry.value_ptr;
-                if (conn.tls) |tls_stream| {
-                    tls_stream.free();
-                    self.allocator.destroy(tls_stream);
+                if (build_options.tls_enabled) {
+                    if (conn.tls) |tls_stream| {
+                        tls_stream.free();
+                        self.allocator.destroy(tls_stream);
+                    }
                 }
                 if (conn.write_body) |b| self.allocator.free(b);
                 if (conn.ws_token) |t| self.allocator.free(t);
@@ -427,7 +440,9 @@ pub const AsyncServer = struct {
         self.ws_ctx_pool.deinit(self.allocator);
         self.allocator.free(self.shared_fiber_stack);
         self.pending_writes.deinit(self.allocator);
-        if (self.tls_config) |*tc| tc.deinit();
+        if (build_options.tls_enabled) {
+            if (self.tls_config) |*tc| tc.deinit();
+        }
         if (self.logger) |l| l.deinit();
         self.cfg = undefined;
     }
@@ -556,6 +571,7 @@ pub const AsyncServer = struct {
         return connection_mgr.getConnToken(self, conn_id);
     }
 
+    if (build_options.tls_enabled) {
     pub fn initTlsStream(self: *Self, conn: *Connection) !void {
         if (self.tls_config) |*tc| {
             const tls_stream = try self.allocator.create(TlsStream);
@@ -563,6 +579,7 @@ pub const AsyncServer = struct {
             tls_stream.* = try TlsStream.new(tc);
             conn.tls = tls_stream;
         }
+    }
     }
 
     pub fn registerSubmitQueue(self: *Self, queue: *uring_submit.SubmitQueue) !void {

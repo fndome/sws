@@ -15,7 +15,8 @@ const Fiber = @import("../next/fiber.zig").Fiber;
 const ws_fiber = @import("ws_fiber.zig");
 const logErr = helpers.logErr;
 const milliTimestamp = @import("event_loop.zig").milliTimestamp;
-const TlsStream = @import("../tls/tls.zig").TlsStream;
+const build_options = @import("build_options");
+const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else opaque {};
 const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
 const MAX_WS_ACCUMULATED_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -158,32 +159,36 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
     var effective_nread = nread;
     var tls_decrypted = false;
 
-    if (conn.tls) |tls_stream| {
-        const decrypted = tls_stream.read(read_buf[0..nread], &plaintext_buf) catch {
-            self.buffer_pool.markReplenish(bid);
-            conn.read_len = 0;
-            self.closeConn(conn_id, conn.fd);
-            return;
-        };
-        if (decrypted == 0) {
-            self.buffer_pool.markReplenish(bid);
-            conn.read_bid = 0;
-            conn.read_len = 0;
-            self.submitRead(conn_id, conn) catch {
+    if (build_options.tls_enabled) {
+        if (conn.tls) |tls_stream| {
+            const decrypted = tls_stream.read(read_buf[0..nread], &plaintext_buf) catch {
+                self.buffer_pool.markReplenish(bid);
+                conn.read_len = 0;
                 self.closeConn(conn_id, conn.fd);
+                return;
             };
-            return;
+            if (decrypted == 0) {
+                self.buffer_pool.markReplenish(bid);
+                conn.read_bid = 0;
+                conn.read_len = 0;
+                self.submitRead(conn_id, conn) catch {
+                    self.closeConn(conn_id, conn.fd);
+                };
+                return;
+            }
+            self.buffer_pool.markReplenish(bid);
+            effective_buf = plaintext_buf[0..decrypted];
+            effective_nread = decrypted;
+            tls_decrypted = true;
+            bid = 0;
+        } else {
+            effective_buf = @constCast(read_buf[0..nread]);
         }
-        self.buffer_pool.markReplenish(bid);
-        effective_buf = plaintext_buf[0..decrypted];
-        effective_nread = decrypted;
-        tls_decrypted = true;
-        bid = 0;
     } else {
         effective_buf = @constCast(read_buf[0..nread]);
     }
 
-    if (!tls_decrypted) {
+    if (!build_options.tls_enabled or !tls_decrypted) {
         if (conn.read_len > 0) self.buffer_pool.markReplenish(conn.read_bid);
         conn.read_bid = bid;
     } else {

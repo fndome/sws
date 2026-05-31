@@ -23,6 +23,7 @@ const TlsStream = @import("../tls/tls.zig").TlsStream;
 const READ_BUF_GROUP_ID = @import("../constants.zig").READ_BUF_GROUP_ID;
 const MAX_BUFFERED_BODY_SIZE: u64 = 1024 * 1024;
 const MAX_REASSEMBLED_HEADER_SIZE: usize = BUFFER_SIZE * 2;
+const build_options = @import("build_options");
 
 const HttpTaskCtx = http_fiber.HttpTaskCtx;
 const httpTaskExec = http_fiber.httpTaskExec;
@@ -97,43 +98,45 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
     var plaintext_buf: [BUFFER_SIZE]u8 = [_]u8{0} ** BUFFER_SIZE;
     var plaintext_len: usize = 0;
     var tls_decrypted = false;
+    if (build_options.tls_enabled) {
 
-    if (conn.tls) |tls_stream| {
-        const decrypted = tls_stream.read(read_buf[0..nread], &plaintext_buf) catch |err| {
-            if (err == error.TlsConnectionClosed) {
+        if (conn.tls) |tls_stream| {
+            const decrypted = tls_stream.read(read_buf[0..nread], &plaintext_buf) catch |err| {
+                if (err == error.TlsConnectionClosed) {
+                    self.buffer_pool.markReplenish(bid);
+                    conn.read_len = 0;
+                    self.closeConn(conn_id, conn.fd);
+                    return;
+                }
                 self.buffer_pool.markReplenish(bid);
                 conn.read_len = 0;
                 self.closeConn(conn_id, conn.fd);
                 return;
+            };
+            plaintext_len = decrypted;
+            if (decrypted == 0) {
+                self.buffer_pool.markReplenish(bid);
+                conn.read_bid = 0;
+                conn.read_len = 0;
+                self.submitRead(conn_id, conn) catch |err_sub| {
+                    logErr("submitRead after TLS WANT_READ: {s}", .{@errorName(err_sub)});
+                    self.closeConn(conn_id, conn.fd);
+                };
+                return;
             }
             self.buffer_pool.markReplenish(bid);
-            conn.read_len = 0;
-            self.closeConn(conn_id, conn.fd);
-            return;
-        };
-        plaintext_len = decrypted;
-        if (decrypted == 0) {
-            self.buffer_pool.markReplenish(bid);
-            conn.read_bid = 0;
-            conn.read_len = 0;
-            self.submitRead(conn_id, conn) catch |err_sub| {
-                logErr("submitRead after TLS WANT_READ: {s}", .{@errorName(err_sub)});
-                self.closeConn(conn_id, conn.fd);
-            };
-            return;
+            tls_decrypted = true;
+            bid = 0;
         }
-        self.buffer_pool.markReplenish(bid);
-        tls_decrypted = true;
-        bid = 0;
     }
 
-    var effective_buf: []const u8 = if (tls_decrypted) plaintext_buf[0..plaintext_len] else read_buf[0..nread];
-    var effective_nread = if (tls_decrypted) plaintext_len else nread;
+    var effective_buf: []const u8 = if (build_options.tls_enabled and tls_decrypted) plaintext_buf[0..plaintext_len] else read_buf[0..nread];
+    var effective_nread = if (build_options.tls_enabled and tls_decrypted) plaintext_len else nread;
     var pending_to_free: u16 = 0;
     var reassembled_header = false;
     var combo: [MAX_REASSEMBLED_HEADER_SIZE]u8 = undefined;
 
-    if (!tls_decrypted and conn.pool_idx != 0xFFFFFFFF) {
+    if ((!build_options.tls_enabled or !tls_decrypted) and conn.pool_idx != 0xFFFFFFFF) {
         const slot = &self.pool.slots[conn.pool_idx];
         const hw = sticker.httpWork(slot);
         if (hw.pending_len > 0 and (hw.pending_bid != 0 or slot.line3.pending_buffer_ptr != 0)) {
@@ -163,7 +166,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         }
     }
 
-    if (!tls_decrypted) {
+    if (!build_options.tls_enabled or !tls_decrypted) {
         if (conn.read_len > 0 and conn.read_bid != pending_to_free) {
             self.buffer_pool.markReplenish(conn.read_bid);
         }

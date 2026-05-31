@@ -1,5 +1,6 @@
 const std = @import("std");
 const linux = std.os.linux;
+const build_options = @import("build_options");
 
 const AsyncServer = @import("async_server.zig").AsyncServer;
 const Connection = @import("connection.zig").Connection;
@@ -15,8 +16,8 @@ const packUserData = @import("../stack_pool.zig").packUserData;
 const CLIENT_USER_DATA_FLAG = @import("../shared/io_registry.zig").CLIENT_USER_DATA_FLAG;
 const Item = @import("../next/queue.zig").Item;
 const IO_QUANTUM: usize = 64;
-const TlsStream = @import("../tls/tls.zig").TlsStream;
-const HandshakeStep = @import("../tls/tls.zig").HandshakeStep;
+const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else opaque {};
+const HandshakeStep = if (build_options.tls_enabled) @import("../tls/tls.zig").HandshakeStep else opaque {};
 
 pub fn milliTimestamp(io: std.Io) i64 {
     const ts = std.Io.Timestamp.now(io, .real);
@@ -186,7 +187,8 @@ pub fn dispatchCqes(self: *AsyncServer, cqes: []linux.io_uring_cqe, n: usize) vo
 
             if (conn_ptr.state == .reading or conn_ptr.state == .processing) {
                 self.onReadComplete(conn_id, res, user_data, cqe.flags);
-            } else if (conn_ptr.state == .tls_handshaking) {
+            }
+            if (build_options.tls_enabled and conn_ptr.state == .tls_handshaking) {
                 self.onTlsHandshake(conn_id, conn_ptr, res, user_data, cqe.flags);
             } else if (conn_ptr.state == .receiving_body) {
                 self.onBodyChunk(conn_id, res);
@@ -298,6 +300,8 @@ pub fn drainTick(self: *AsyncServer) void {
         hook(self);
     }
 }
+
+if (build_options.tls_enabled) {
 
 fn onTlsHandshake(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32, user_data: u64, cqe_flags: u32) void {
     _ = user_data;
@@ -414,3 +418,5 @@ fn submitTlsHandshakeWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, 
     if (conn.fixed_index != 0xFFFF) sqe.flags |= linux.IOSQE_FIXED_FILE;
     tls_stream.pending_handshake_write = true;
 }
+
+} // build_options.tls_enabled

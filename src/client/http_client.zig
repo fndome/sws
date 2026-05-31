@@ -1,11 +1,12 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const build_options = @import("build_options");
 
 const RingB = @import("ring.zig").RingB;
 const RingSharedClient = @import("../shared/tcp_stream.zig").RingSharedClient;
 const TinyCache = @import("tiny_cache.zig").TinyCache;
 const Pipe = @import("../next/pipe.zig").Pipe;
-const TlsConfig = @import("../tls/tls.zig").TlsConfig;
+const TlsConfig = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsConfig else opaque {};
 const Fiber = @import("../next/fiber.zig").Fiber;
 
 pub const Response = struct {
@@ -413,10 +414,12 @@ pub const HttpClient = struct {
         return self;
     }
 
+    if (build_options.tls_enabled) {
     pub fn enableTls(self: *HttpClient) !void {
         if (self.tls_client_config == null) {
             self.tls_client_config = try TlsConfig.init(self.allocator, null, null, false);
         }
+    }
     }
 
     fn lockPool(self: *HttpClient) void {
@@ -798,6 +801,12 @@ fn httpRequestFiber(user_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []c
             return;
         }
         if (parsed.tls) {
+            if (!build_options.tls_enabled) {
+                stream.deinit();
+                ctx.response = makeErrorResponse(ctx.allocator, 502, "TLS not supported");
+                ctx.notify();
+                return;
+            }
             if (client.tls_client_config) |*tc| {
                 stream.startTls(tc) catch {
                     stream.deinit();

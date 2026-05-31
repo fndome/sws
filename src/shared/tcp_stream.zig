@@ -1,16 +1,17 @@
 const std = @import("std");
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
+const build_options = @import("build_options");
 
 const RingShared = @import("ring_shared.zig").RingShared;
 const DnsResolver = @import("../dns/resolver.zig").DnsResolver;
-const TlsStream = @import("../tls/tls.zig").TlsStream;
-const HandshakeStep = @import("../tls/tls.zig").HandshakeStep;
-const tls_lib = @import("tls");
+const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else opaque {};
+const HandshakeStep = if (build_options.tls_enabled) @import("../tls/tls.zig").HandshakeStep else opaque {};
+const tls_lib = if (build_options.tls_enabled) @import("tls") else @import("../tls/noop.zig");
 
 pub const CLIENT_READ_BUF = 16384;
-pub const CLIENT_TLS_RECV_BUF = tls_lib.input_buffer_len;
-pub const CLIENT_TLS_SEND_BUF = tls_lib.output_buffer_len;
+pub const CLIENT_TLS_RECV_BUF = if (build_options.tls_enabled) tls_lib.input_buffer_len else CLIENT_READ_BUF;
+pub const CLIENT_TLS_SEND_BUF = if (build_options.tls_enabled) tls_lib.output_buffer_len else CLIENT_READ_BUF;
 const CLIENT_WRITE_USER_DATA_FLAG: u64 = 1 << 61;
 
 fn clientDispatch(ptr: *anyopaque, user_data: u64, res: i32) void {
@@ -47,8 +48,10 @@ pub const RingSharedClient = struct {
 
     dns: ?*DnsResolver,
     fixed_index: u16 = 0xFFFF,
-    tls: ?*TlsStream = null,
-    tls_handshaking: bool = false,
+    pub usingnamespace if (build_options.tls_enabled) struct {
+        tls: ?*TlsStream = null,
+        tls_handshaking: bool = false,
+    } else struct {};
 
     pub const State = enum(u8) {
         idle,
@@ -88,10 +91,12 @@ pub const RingSharedClient = struct {
     }
 
     pub fn deinit(self: *RingSharedClient) void {
-        if (self.tls) |tls_stream| {
-            tls_stream.free();
-            self.allocator.destroy(tls_stream);
-            self.tls = null;
+        if (build_options.tls_enabled) {
+            if (self.tls) |tls_stream| {
+                tls_stream.free();
+                self.allocator.destroy(tls_stream);
+                self.tls = null;
+            }
         }
         if (self.id != 0) {
             self.rs.remove(self.id);
@@ -202,14 +207,18 @@ pub const RingSharedClient = struct {
             return;
         }
         if (self.state != .connected) return error.NotConnected;
-        if (self.tls != null) {
-            return self.writeTls(data);
+        if (build_options.tls_enabled) {
+            if (self.tls != null) {
+                return self.writeTls(data);
+            }
         }
         try self.write_buf.appendSlice(self.allocator, data);
         if (!self.writing) {
             try self.flushWrite();
         }
     }
+
+    if (build_options.tls_enabled) {
 
     fn writeTls(self: *RingSharedClient, data: []const u8) !void {
         const tls_stream = self.tls orelse return error.NotConnected;
@@ -222,11 +231,17 @@ pub const RingSharedClient = struct {
         }
     }
 
+    }
+
+    if (build_options.tls_enabled) {
+
     fn writeRawTls(self: *RingSharedClient, data: []const u8) !void {
         try self.write_buf.appendSlice(self.allocator, data);
         if (!self.writing) {
             try self.flushWrite();
         }
+    }
+
     }
 
     fn flushWrite(self: *RingSharedClient) !void {
@@ -258,6 +273,8 @@ pub const RingSharedClient = struct {
         if (self.state == .closing or self.state == .closed) return;
         self.state = .closing;
     }
+
+    if (build_options.tls_enabled) {
 
     pub fn startTls(self: *RingSharedClient, tls_config: *@import("../tls/tls.zig").TlsConfig) !void {
         const tls_stream = try self.allocator.create(TlsStream);
@@ -307,6 +324,8 @@ pub const RingSharedClient = struct {
         }
     }
 
+    } // build_options.tls_enabled (startTls)
+
     pub fn dispatchCqe(self: *RingSharedClient, cqe: *const linux.io_uring_cqe) void {
         self.dispatchCqeRes(cqe.user_data, cqe.res);
     }
@@ -355,33 +374,35 @@ pub const RingSharedClient = struct {
                         return;
                     }
                     self.write_offset += @intCast(res);
-                    if (self.tls_handshaking) {
-                        if (self.tls) |tls_stream| {
-                            const step = tls_stream.handshakeAdvance(null) catch {
-                                self.onClose();
-                                return;
-                            };
-                            switch (step) {
-                                .done => {
-                                    self.tls_handshaking = false;
-                                },
-                                .want_write => {
-                                    const handshake_out = tls_stream.handshakeOutput();
-                                    self.writeRawTls(handshake_out) catch {
-                                        self.onClose();
-                                    };
-                                    return;
-                                },
-                                .want_read => {
-                                    self.submitRead() catch {
-                                        self.onClose();
-                                    };
-                                    return;
-                                },
-                                .@"error" => {
+                    if (build_options.tls_enabled) {
+                        if (self.tls_handshaking) {
+                            if (self.tls) |tls_stream| {
+                                const step = tls_stream.handshakeAdvance(null) catch {
                                     self.onClose();
                                     return;
-                                },
+                                };
+                                switch (step) {
+                                    .done => {
+                                        self.tls_handshaking = false;
+                                    },
+                                    .want_write => {
+                                        const handshake_out = tls_stream.handshakeOutput();
+                                        self.writeRawTls(handshake_out) catch {
+                                            self.onClose();
+                                        };
+                                        return;
+                                    },
+                                    .want_read => {
+                                        self.submitRead() catch {
+                                            self.onClose();
+                                        };
+                                        return;
+                                    },
+                                    .@"error" => {
+                                        self.onClose();
+                                        return;
+                                    },
+                                }
                             }
                         }
                     }
@@ -394,44 +415,48 @@ pub const RingSharedClient = struct {
                         return;
                     }
                     const raw_read = self.read_buf[0..@intCast(res)];
-                    if (self.tls_handshaking) {
+                    if (build_options.tls_enabled) {
+                        if (self.tls_handshaking) {
+                            if (self.tls) |tls_stream| {
+                                const step = tls_stream.handshakeAdvance(raw_read) catch {
+                                    self.onClose();
+                                    return;
+                                };
+                                switch (step) {
+                                    .done => {
+                                        self.tls_handshaking = false;
+                                    },
+                                    .want_write => {
+                                        const handshake_out = tls_stream.handshakeOutput();
+                                        self.writeRawTls(handshake_out) catch {
+                                            self.onClose();
+                                        };
+                                        return;
+                                    },
+                                    .want_read => {
+                                        self.submitRead() catch {
+                                            self.onClose();
+                                        };
+                                        return;
+                                    },
+                                    .@"error" => {
+                                        self.onClose();
+                                        return;
+                                    },
+                                }
+                            }
+                        }
                         if (self.tls) |tls_stream| {
-                            const step = tls_stream.handshakeAdvance(raw_read) catch {
+                            var plaintext_buf: [CLIENT_READ_BUF]u8 = [_]u8{0} ** CLIENT_READ_BUF;
+                            const decrypted = tls_stream.read(raw_read, &plaintext_buf) catch {
                                 self.onClose();
                                 return;
                             };
-                            switch (step) {
-                                .done => {
-                                    self.tls_handshaking = false;
-                                },
-                                .want_write => {
-                                    const handshake_out = tls_stream.handshakeOutput();
-                                    self.writeRawTls(handshake_out) catch {
-                                        self.onClose();
-                                    };
-                                    return;
-                                },
-                                .want_read => {
-                                    self.submitRead() catch {
-                                        self.onClose();
-                                    };
-                                    return;
-                                },
-                                .@"error" => {
-                                    self.onClose();
-                                    return;
-                                },
+                            if (decrypted > 0) {
+                                self.on_data(self, self.callback_ctx, plaintext_buf[0..decrypted]);
                             }
-                        }
-                    }
-                    if (self.tls) |tls_stream| {
-                        var plaintext_buf: [CLIENT_READ_BUF]u8 = [_]u8{0} ** CLIENT_READ_BUF;
-                        const decrypted = tls_stream.read(raw_read, &plaintext_buf) catch {
-                            self.onClose();
-                            return;
-                        };
-                        if (decrypted > 0) {
-                            self.on_data(self, self.callback_ctx, plaintext_buf[0..decrypted]);
+                        } else {
+                            self.on_data(self, self.callback_ctx, raw_read);
                         }
                     } else {
                         self.on_data(self, self.callback_ctx, raw_read);

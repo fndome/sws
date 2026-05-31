@@ -7,6 +7,7 @@ const packUserData = @import("../stack_pool.zig").packUserData;
 const logErr = @import("http_helpers.zig").logErr;
 const milliTimestamp = @import("event_loop.zig").milliTimestamp;
 const TlsStream = @import("../tls/tls.zig").TlsStream;
+const build_options = @import("build_options");
 
 const maxWriteRetries = @import("http_response.zig").maxWriteRetries;
 
@@ -24,8 +25,10 @@ pub fn submitWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
         conn.write_retries = 0;
     }
 
-    if (conn.tls) |tls_stream| {
-        return submitTlsWrite(self, conn_id, conn, tls_stream);
+    if (build_options.tls_enabled) {
+        if (conn.tls) |tls_stream| {
+            return submitTlsWrite(self, conn_id, conn, tls_stream);
+        }
     }
 
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
@@ -104,8 +107,10 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
         return;
     }
     const conn = self.getConn(conn_id) orelse return;
-    if (conn.tls != null) {
-        return onTlsWriteComplete(self, conn_id, conn, res);
+    if (build_options.tls_enabled) {
+        if (conn.tls != null) {
+            return onTlsWriteComplete(self, conn_id, conn, res);
+        }
     }
     conn.write_offset += @as(usize, @intCast(res));
     const total = conn.write_headers_len + if (conn.write_body) |b| b.len else 0;
@@ -171,6 +176,7 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
     }
 }
 
+if (build_options.tls_enabled) {
 fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_stream: *TlsStream) !void {
     _ = conn_id;
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
@@ -310,4 +316,5 @@ fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: 
     } else {
         self.closeConn(conn_id, conn.fd);
     }
+}
 }
