@@ -91,7 +91,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         self.closeConn(conn_id, conn.fd);
         return;
     }
-    const bid = @as(u16, @truncate(cqe_flags >> 16));
+    var bid = @as(u16, @truncate(cqe_flags >> 16));
     const read_buf = self.buffer_pool.getReadBuf(bid);
     const nread = @as(usize, @intCast(res));
 

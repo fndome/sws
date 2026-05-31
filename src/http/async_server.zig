@@ -61,10 +61,8 @@ pub const TlsAuth = struct {
     key_path: [:0]const u8,
 };
 
-if (build_options.tls_enabled) {
-    const TlsConfig = @import("../tls/tls.zig").TlsConfig;
-    const TlsStream = @import("../tls/tls.zig").TlsStream;
-}
+const TlsConfig = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsConfig else struct {};
+const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 
 const DeferredNode = hook_system.DeferredNode;
 const deferredRespond = hook_system.deferredRespond;
@@ -159,9 +157,7 @@ pub const AsyncServer = struct {
     /// SQ ring 溢出时暂存的写请求 (1M broadcast 场景的背压机制)
     pending_writes: std.ArrayList(u64),
 
-    pub usingnamespace if (build_options.tls_enabled) struct {
-        tls_config: ?TlsConfig = null,
-    } else struct {};
+    tls_config: ?TlsConfig = null,
 
     worker_orig_cpu_mask: usize = 0,
 
@@ -259,7 +255,7 @@ pub const AsyncServer = struct {
         var tls_config: if (build_options.tls_enabled) ?TlsConfig else void = if (build_options.tls_enabled) null else {};
         if (build_options.tls_enabled) {
             if (tls_auth) |auth| {
-                tls_config = try TlsConfig.init(allocator, auth.cert_path, auth.key_path, true);
+                tls_config = try TlsConfig.init(allocator, io, auth.cert_path, auth.key_path, true);
             }
         }
         errdefer if (build_options.tls_enabled) {
@@ -571,15 +567,15 @@ pub const AsyncServer = struct {
         return connection_mgr.getConnToken(self, conn_id);
     }
 
-    if (build_options.tls_enabled) {
     pub fn initTlsStream(self: *Self, conn: *Connection) !void {
-        if (self.tls_config) |*tc| {
-            const tls_stream = try self.allocator.create(TlsStream);
-            errdefer self.allocator.destroy(tls_stream);
-            tls_stream.* = try TlsStream.new(tc);
-            conn.tls = tls_stream;
+        if (build_options.tls_enabled) {
+            if (self.tls_config) |*tc| {
+                const tls_stream = try self.allocator.create(TlsStream);
+                errdefer self.allocator.destroy(tls_stream);
+                tls_stream.* = try TlsStream.new(tc);
+                conn.tls = tls_stream;
+            }
         }
-    }
     }
 
     pub fn registerSubmitQueue(self: *Self, queue: *uring_submit.SubmitQueue) !void {

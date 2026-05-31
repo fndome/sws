@@ -15,7 +15,6 @@ const CertKeyPairType = struct {
     }
     pub fn deinit(_: *@This(), _: anytype) void {}
 };
-pub const CertKeyPair = CertKeyPairType;
 
 pub const config = struct {
     pub const CertKeyPair = CertKeyPairType;

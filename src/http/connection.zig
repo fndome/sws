@@ -1,6 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
-const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else opaque {};
+const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 
 pub const ConnState = if (build_options.tls_enabled) enum(u8) {
     reading,
@@ -61,10 +61,8 @@ pub const Connection = struct {
     gen_id: u32 = 0,
     /// Position in pool.live list (for O(1) swap-remove)
     active_list_pos: u32 = 0xFFFFFFFF,
-    pub usingnamespace if (build_options.tls_enabled) struct {
-        tls: ?*TlsStream = null,
-        tls_write_len: u32 = 0,
-    } else struct {};
+    tls: ?*TlsStream = null,
+    tls_write_len: u32 = 0,
 };
 
 /// WebSocket 写队列节点（单 IO 线程，无需原子操作）

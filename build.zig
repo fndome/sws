@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     const enable_tls = b.option(bool, "tls", "Enable TLS support (via tls.zig)") orelse false;
 
     const tls_dep = if (enable_tls)
-        b.dependency("tls_zig", .{})
+        b.lazyDependency("tls_zig", .{})
     else
         null;
 

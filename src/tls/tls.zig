@@ -16,13 +16,12 @@ pub const TlsConfig = struct {
     sni_host: []const u8 = "localhost",
     init_now: std.Io.Timestamp,
 
-    pub fn init(allocator: std.mem.Allocator, cert_path: ?[:0]const u8, key_path: ?[:0]const u8, is_server: bool) !TlsConfig {
-        const io = std.Io{};
-        const now = std.Io.Clock.real.now(io);
+    pub fn init(allocator: std.mem.Allocator, io: ?std.Io, cert_path: ?[:0]const u8, key_path: ?[:0]const u8, is_server: bool) !TlsConfig {
+        const now = if (io) |the_io| std.Io.Timestamp.now(the_io, .real) else std.Io.Timestamp.zero;
 
         if (is_server) {
             if (cert_path == null or key_path == null) return error.MissingCertificate;
-            const ckp = try tls_lib.config.CertKeyPair.fromFilePathAbsolute(allocator, io, cert_path.?, key_path.?);
+            const ckp = try tls_lib.config.CertKeyPair.fromFilePathAbsolute(allocator, io.?, cert_path.?, key_path.?);
             return TlsConfig{
                 .allocator = allocator,
                 .is_server = true,
@@ -48,16 +47,18 @@ pub const TlsConfig = struct {
     }
 
     fn serverOptions(self: *TlsConfig) tls_lib.config.Server {
+        var prng = std.Random.Xoshiro256.init(@intCast(self.init_now.nanoseconds));
         return .{
-            .rng = std.crypto.random,
+            .rng = prng.random(),
             .auth = if (self.cert_key_pair) |*ckp| ckp else null,
             .now = self.init_now,
         };
     }
 
     fn clientOptions(self: *const TlsConfig) tls_lib.config.Client {
+        var prng = std.Random.Xoshiro256.init(@intCast(self.init_now.nanoseconds));
         return .{
-            .rng = std.crypto.random,
+            .rng = prng.random(),
             .now = self.init_now,
             .host = self.sni_host,
             .root_ca = .empty,

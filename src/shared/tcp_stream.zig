@@ -5,9 +5,9 @@ const build_options = @import("build_options");
 
 const RingShared = @import("ring_shared.zig").RingShared;
 const DnsResolver = @import("../dns/resolver.zig").DnsResolver;
-const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else opaque {};
-const HandshakeStep = if (build_options.tls_enabled) @import("../tls/tls.zig").HandshakeStep else opaque {};
-const tls_lib = if (build_options.tls_enabled) @import("tls") else @import("../tls/noop.zig");
+const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
+const HandshakeStep = if (build_options.tls_enabled) @import("../tls/tls.zig").HandshakeStep else struct {};
+const tls_lib = @import("tls");
 
 pub const CLIENT_READ_BUF = 16384;
 pub const CLIENT_TLS_RECV_BUF = if (build_options.tls_enabled) tls_lib.input_buffer_len else CLIENT_READ_BUF;
@@ -48,10 +48,8 @@ pub const RingSharedClient = struct {
 
     dns: ?*DnsResolver,
     fixed_index: u16 = 0xFFFF,
-    pub usingnamespace if (build_options.tls_enabled) struct {
-        tls: ?*TlsStream = null,
-        tls_handshaking: bool = false,
-    } else struct {};
+    tls: ?*TlsStream = null,
+    tls_handshaking: bool = false,
 
     pub const State = enum(u8) {
         idle,
@@ -218,9 +216,8 @@ pub const RingSharedClient = struct {
         }
     }
 
-    if (build_options.tls_enabled) {
-
     fn writeTls(self: *RingSharedClient, data: []const u8) !void {
+        if (build_options.tls_enabled) {
         const tls_stream = self.tls orelse return error.NotConnected;
         var ciphertext_buf: [CLIENT_TLS_SEND_BUF]u8 = [_]u8{0} ** CLIENT_TLS_SEND_BUF;
         const ciphertext_len = tls_stream.write(data, &ciphertext_buf) catch return error.TlsWriteFailed;
@@ -229,19 +226,16 @@ pub const RingSharedClient = struct {
         if (!self.writing) {
             try self.flushWrite();
         }
+        }
     }
-
-    }
-
-    if (build_options.tls_enabled) {
 
     fn writeRawTls(self: *RingSharedClient, data: []const u8) !void {
+        if (build_options.tls_enabled) {
         try self.write_buf.appendSlice(self.allocator, data);
         if (!self.writing) {
             try self.flushWrite();
         }
-    }
-
+        }
     }
 
     fn flushWrite(self: *RingSharedClient) !void {
@@ -274,9 +268,8 @@ pub const RingSharedClient = struct {
         self.state = .closing;
     }
 
-    if (build_options.tls_enabled) {
-
     pub fn startTls(self: *RingSharedClient, tls_config: *@import("../tls/tls.zig").TlsConfig) !void {
+        if (build_options.tls_enabled) {
         const tls_stream = try self.allocator.create(TlsStream);
         errdefer self.allocator.destroy(tls_stream);
         tls_stream.* = try TlsStream.new(tls_config);
@@ -323,8 +316,7 @@ pub const RingSharedClient = struct {
             },
         }
     }
-
-    } // build_options.tls_enabled (startTls)
+    } // build_options.tls_enabled
 
     pub fn dispatchCqe(self: *RingSharedClient, cqe: *const linux.io_uring_cqe) void {
         self.dispatchCqeRes(cqe.user_data, cqe.res);

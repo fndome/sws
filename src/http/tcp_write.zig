@@ -176,9 +176,8 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
     }
 }
 
-if (build_options.tls_enabled) {
 fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_stream: *TlsStream) !void {
-    _ = conn_id;
+    if (build_options.tls_enabled) {
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
     const fd = if (conn.fixed_index != 0xFFFF) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
 
@@ -250,9 +249,11 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
         };
         conn.tls_write_len = @intCast(ciphertext_len);
     }
+    }
 }
 
 fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32) void {
+    if (build_options.tls_enabled) {
     if (res <= 0) {
         if (conn.pool_idx != 0xFFFFFFFF) {
             self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;

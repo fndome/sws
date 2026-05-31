@@ -6,7 +6,7 @@ const RingB = @import("ring.zig").RingB;
 const RingSharedClient = @import("../shared/tcp_stream.zig").RingSharedClient;
 const TinyCache = @import("tiny_cache.zig").TinyCache;
 const Pipe = @import("../next/pipe.zig").Pipe;
-const TlsConfig = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsConfig else opaque {};
+const TlsConfig = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsConfig else struct {};
 const Fiber = @import("../next/fiber.zig").Fiber;
 
 pub const Response = struct {
@@ -414,12 +414,14 @@ pub const HttpClient = struct {
         return self;
     }
 
-    if (build_options.tls_enabled) {
     pub fn enableTls(self: *HttpClient) !void {
-        if (self.tls_client_config == null) {
-            self.tls_client_config = try TlsConfig.init(self.allocator, null, null, false);
+        if (build_options.tls_enabled) {
+            if (self.tls_client_config == null) {
+                self.tls_client_config = try TlsConfig.init(self.allocator, null, null, null, false);
+            }
+        } else {
+            return error.TlsNotSupported;
         }
-    }
     }
 
     fn lockPool(self: *HttpClient) void {

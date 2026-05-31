@@ -16,7 +16,7 @@ const ws_fiber = @import("ws_fiber.zig");
 const logErr = helpers.logErr;
 const milliTimestamp = @import("event_loop.zig").milliTimestamp;
 const build_options = @import("build_options");
-const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else opaque {};
+const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
 const MAX_WS_ACCUMULATED_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -150,7 +150,7 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
         self.closeConn(conn_id, conn.fd);
         return;
     }
-    const bid = @as(u16, @truncate(cqe_flags >> 16));
+    var bid = @as(u16, @truncate(cqe_flags >> 16));
     const read_buf = self.buffer_pool.getReadBuf(bid);
     const nread = @as(usize, @intCast(res));
 
