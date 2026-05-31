@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_arch = .x86_64, .os_tag = .linux } });
     const optimize = b.standardOptimizeOption(.{});
 
-    const enable_tls = b.option(bool, "tls", "Enable TLS support (via tls.zig)") orelse false;
+    const enable_tls = b.option(bool, "enable-tls", "Enable TLS support (via tls.zig)") orelse false;
 
     const tls_dep = if (enable_tls)
         b.lazyDependency("tls_zig", .{})
