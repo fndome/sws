@@ -6,8 +6,11 @@ const RingShared = @import("ring_shared.zig").RingShared;
 const DnsResolver = @import("../dns/resolver.zig").DnsResolver;
 const TlsStream = @import("../tls/tls.zig").TlsStream;
 const HandshakeStep = @import("../tls/tls.zig").HandshakeStep;
+const tls_lib = @import("tls");
 
 pub const CLIENT_READ_BUF = 16384;
+pub const CLIENT_TLS_RECV_BUF = tls_lib.input_buffer_len;
+pub const CLIENT_TLS_SEND_BUF = tls_lib.output_buffer_len;
 const CLIENT_WRITE_USER_DATA_FLAG: u64 = 1 << 61;
 
 fn clientDispatch(ptr: *anyopaque, user_data: u64, res: i32) void {
@@ -210,7 +213,7 @@ pub const RingSharedClient = struct {
 
     fn writeTls(self: *RingSharedClient, data: []const u8) !void {
         const tls_stream = self.tls orelse return error.NotConnected;
-        var ciphertext_buf: [CLIENT_READ_BUF]u8 = [_]u8{0} ** CLIENT_READ_BUF;
+        var ciphertext_buf: [CLIENT_TLS_SEND_BUF]u8 = [_]u8{0} ** CLIENT_TLS_SEND_BUF;
         const ciphertext_len = tls_stream.write(data, &ciphertext_buf) catch return error.TlsWriteFailed;
         if (ciphertext_len == 0) return;
         try self.write_buf.appendSlice(self.allocator, ciphertext_buf[0..ciphertext_len]);
@@ -256,7 +259,7 @@ pub const RingSharedClient = struct {
         self.state = .closing;
     }
 
-    pub fn startTls(self: *RingSharedClient, tls_config: *const @import("../tls/tls.zig").TlsConfig) !void {
+    pub fn startTls(self: *RingSharedClient, tls_config: *@import("../tls/tls.zig").TlsConfig) !void {
         const tls_stream = try self.allocator.create(TlsStream);
         errdefer self.allocator.destroy(tls_stream);
         tls_stream.* = try TlsStream.new(tls_config);

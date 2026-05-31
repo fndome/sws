@@ -13,6 +13,7 @@ pub const TlsConfig = struct {
     is_server: bool,
     cert_key_pair: ?tls_lib.config.CertKeyPair = null,
     root_ca: ?tls_lib.config.cert.Bundle = null,
+    sni_host: []const u8 = "localhost",
     init_now: std.Io.Timestamp,
 
     pub fn init(allocator: std.mem.Allocator, cert_path: ?[:0]const u8, key_path: ?[:0]const u8, is_server: bool) !TlsConfig {
@@ -46,10 +47,10 @@ pub const TlsConfig = struct {
         }
     }
 
-    fn serverOptions(self: *const TlsConfig) tls_lib.config.Server {
+    fn serverOptions(self: *TlsConfig) tls_lib.config.Server {
         return .{
             .rng = std.crypto.random,
-            .auth = if (self.cert_key_pair) |*ckp| @constCast(ckp) else null,
+            .auth = if (self.cert_key_pair) |*ckp| ckp else null,
             .now = self.init_now,
         };
     }
@@ -58,7 +59,8 @@ pub const TlsConfig = struct {
         return .{
             .rng = std.crypto.random,
             .now = self.init_now,
-            .host = "localhost",
+            .host = self.sni_host,
+            .root_ca = .empty,
             .insecure_skip_verify = true,
         };
     }
@@ -79,7 +81,7 @@ pub const TlsStream = struct {
         connected: tls_lib.nonblock.Connection,
     };
 
-    pub fn new(config: *const TlsConfig) !TlsStream {
+    pub fn new(config: *TlsConfig) !TlsStream {
         if (config.is_server) {
             return TlsStream{
                 .state = .{ .server = tls_lib.nonblock.Server.init(config.serverOptions()) },
@@ -98,10 +100,12 @@ pub const TlsStream = struct {
     pub fn handshakeAdvance(self: *TlsStream, in_data: ?[]const u8) !HandshakeStep {
         if (self.ready_cipher) |cipher| {
             if (in_data) |data| {
-                if (data.len > 0 and self.saved_ciphertext_len == 0) {
-                    const n = @min(data.len, self.saved_ciphertext.len);
-                    @memcpy(self.saved_ciphertext[0..n], data[0..n]);
-                    self.saved_ciphertext_len = n;
+                if (data.len > 0) {
+                    const start = self.saved_ciphertext_len;
+                    const space = self.saved_ciphertext.len - start;
+                    const n = @min(data.len, space);
+                    @memcpy(self.saved_ciphertext[start..][0..n], data[0..n]);
+                    self.saved_ciphertext_len = start + n;
                 }
             }
             self.state = .{ .connected = tls_lib.nonblock.Connection.init(cipher) };
@@ -109,6 +113,7 @@ pub const TlsStream = struct {
             return .done;
         }
 
+        var combined: [tls_lib.max_ciphertext_record_len]u8 = undefined;
         const in = in_data orelse &.{};
 
         switch (self.state) {
@@ -116,7 +121,18 @@ pub const TlsStream = struct {
                 if (s.done()) {
                     return finalizeHandshake(self, s.cipher().?, 0);
                 }
-                const res = s.run(in, &self.handshake_out_buf) catch return .error;
+                const effective_in = if (self.saved_ciphertext_len > 0) blk: {
+                    const saved_len = self.saved_ciphertext_len;
+                    const total = saved_len + in.len;
+                    if (total > combined.len) return .error;
+                    @memcpy(combined[0..saved_len], self.saved_ciphertext[0..saved_len]);
+                    @memcpy(combined[saved_len..total], in);
+                    self.saved_ciphertext_len = 0;
+                    break :blk combined[0..total];
+                } else in;
+
+                const res = s.run(effective_in, &self.handshake_out_buf) catch return .error;
+                self.saved_ciphertext_len = saveUnused(self.saved_ciphertext[0..], res.unused_recv);
                 if (s.done()) {
                     return finalizeHandshake(self, s.cipher().?, res.send.len);
                 }
@@ -128,7 +144,18 @@ pub const TlsStream = struct {
                 if (c.done()) {
                     return finalizeHandshake(self, c.cipher().?, 0);
                 }
-                const res = c.run(in, &self.handshake_out_buf) catch return .error;
+                const effective_in = if (self.saved_ciphertext_len > 0) blk: {
+                    const saved_len = self.saved_ciphertext_len;
+                    const total = saved_len + in.len;
+                    if (total > combined.len) return .error;
+                    @memcpy(combined[0..saved_len], self.saved_ciphertext[0..saved_len]);
+                    @memcpy(combined[saved_len..total], in);
+                    self.saved_ciphertext_len = 0;
+                    break :blk combined[0..total];
+                } else in;
+
+                const res = c.run(effective_in, &self.handshake_out_buf) catch return .error;
+                self.saved_ciphertext_len = saveUnused(self.saved_ciphertext[0..], res.unused_recv);
                 if (c.done()) {
                     return finalizeHandshake(self, c.cipher().?, res.send.len);
                 }
