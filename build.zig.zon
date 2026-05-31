@@ -33,7 +33,7 @@
     // internet connectivity.
     .dependencies = .{
         .tls_zig = .{
-            .path = "../../tls.zig",
+            .path = "lib/tls.zig",
             .lazy = true,
         },
     },
@@ -49,8 +49,6 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        // For example...
-        //"LICENSE",
-        //"README.md",
+        "lib",
     },
 }
