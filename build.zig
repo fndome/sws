@@ -104,6 +104,7 @@ pub fn build(b: *std.Build) void {
         mod_tests.root_module.addImport("tls", dep.module("tls"));
     }
     mod_tests.root_module.addOptions("build_options", build_options);
+    const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
