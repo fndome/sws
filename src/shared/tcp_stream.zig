@@ -297,7 +297,7 @@ pub const RingSharedClient = struct {
             .done => {
                 self.tls_handshaking = false;
             },
-            .error => {
+            .@"error" => {
                 tls_stream.free();
                 self.allocator.destroy(tls_stream);
                 self.tls = null;
@@ -378,7 +378,7 @@ pub const RingSharedClient = struct {
                                     };
                                     return;
                                 },
-                                .error => {
+                                .@"error" => {
                                     self.onClose();
                                     return;
                                 },
@@ -417,7 +417,7 @@ pub const RingSharedClient = struct {
                                     };
                                     return;
                                 },
-                                .error => {
+                                .@"error" => {
                                     self.onClose();
                                     return;
                                 },

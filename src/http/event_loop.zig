@@ -391,7 +391,7 @@ fn onTlsHandshake(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32,
                 self.closeConn(conn_id, conn.fd);
             };
         },
-        .error => {
+        .@"error" => {
             if (bid != 0) {
                 self.buffer_pool.markReplenish(bid);
                 conn.read_bid = 0;

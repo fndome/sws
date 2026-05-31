@@ -5,7 +5,7 @@ pub const HandshakeStep = enum {
     want_read,
     want_write,
     done,
-    error,
+    @"error",
 };
 
 pub const TlsConfig = struct {
@@ -124,14 +124,14 @@ pub const TlsStream = struct {
                 const effective_in = if (self.saved_ciphertext_len > 0) blk: {
                     const saved_len = self.saved_ciphertext_len;
                     const total = saved_len + in.len;
-                    if (total > combined.len) return .error;
+                    if (total > combined.len) return .@"error";
                     @memcpy(combined[0..saved_len], self.saved_ciphertext[0..saved_len]);
                     @memcpy(combined[saved_len..total], in);
                     self.saved_ciphertext_len = 0;
                     break :blk combined[0..total];
                 } else in;
 
-                const res = s.run(effective_in, &self.handshake_out_buf) catch return .error;
+                const res = s.run(effective_in, &self.handshake_out_buf) catch return .@"error";
                 self.saved_ciphertext_len = saveUnused(self.saved_ciphertext[0..], res.unused_recv);
                 if (s.done()) {
                     return finalizeHandshake(self, s.cipher().?, res.send.len);
@@ -147,14 +147,14 @@ pub const TlsStream = struct {
                 const effective_in = if (self.saved_ciphertext_len > 0) blk: {
                     const saved_len = self.saved_ciphertext_len;
                     const total = saved_len + in.len;
-                    if (total > combined.len) return .error;
+                    if (total > combined.len) return .@"error";
                     @memcpy(combined[0..saved_len], self.saved_ciphertext[0..saved_len]);
                     @memcpy(combined[saved_len..total], in);
                     self.saved_ciphertext_len = 0;
                     break :blk combined[0..total];
                 } else in;
 
-                const res = c.run(effective_in, &self.handshake_out_buf) catch return .error;
+                const res = c.run(effective_in, &self.handshake_out_buf) catch return .@"error";
                 self.saved_ciphertext_len = saveUnused(self.saved_ciphertext[0..], res.unused_recv);
                 if (c.done()) {
                     return finalizeHandshake(self, c.cipher().?, res.send.len);
