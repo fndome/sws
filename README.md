@@ -18,8 +18,8 @@ Current scope:
 - WebSocket: HTTP/1.1 upgrade, frame parse/write, ping/pong/close handling.
 - DNS and outbound HTTP client: async UDP DNS, small TTL cache, keep-alive
   connection reuse.
-- Linux + `io_uring` only. TLS is not built in; put a TLS proxy in front or add a
-  dedicated TLS layer.
+- Linux + `io_uring` only. TLS/HTTPS/WSS via pure-Zig tls.zig library, bundled in `lib/`.
+  Enable with `-Denable-tls=true`.
 
 Performance numbers should be read together with the benchmark mode. The local
 self-test is a correctness smoke test: client and server share one machine and
@@ -813,6 +813,33 @@ WS handlers may offload frame data asynchronously, so frame payloads must remain
 
 **~110ns overhead per frame**. 1M connections, 1% active, 10 msg/s each = 100K msg/s:
 - CPU: 100K × 110ns = **11ms/s = 1.1% of one core**
+
+## TLS / HTTPS / WSS
+
+TLS is powered by the pure-Zig [tls.zig](lib/tls.zig) library (TLS 1.3 server). Enable at build time:
+
+```bash
+zig build -Denable-tls=true
+```
+
+### Server TLS
+
+```zig
+var server = try sws.AsyncServer.init(alloc, io, "0.0.0.0:9443", null, 64,
+    .{ .cert_path = "/etc/ssl/fullchain.pem", .key_path = "/etc/ssl/privkey.pem" }
+);
+// Pass null to disable TLS
+```
+
+### Client TLS
+
+```zig
+var client = try sws.HttpClient.init(alloc, &ring_b);
+try client.enableTls();
+const resp = try client.get("https://api.example.com/data");
+```
+
+**Certificate formats:** PEM (PKCS#8 private key), ECDSA P-256/P-384, RSA 2048/3072/4096. Let's Encrypt compatible.
 
 ## Config
 

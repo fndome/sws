@@ -16,7 +16,7 @@
 2. **可验证**：固定自测覆盖 `GET/POST/PUT/PATCH/DELETE`、JSON body、
    keep-alive、WebSocket、非法请求、DNS 异常和小规模 benchmark。
 3. **有清晰定位**：Linux + `io_uring` 专用，HTTP/1.1 + WebSocket + 出站
-   HTTP client；暂不内建 TLS，需要前置 TLS 代理或后续单独实现 TLS 层。
+    HTTP client；内建纯 Zig tls.zig 库（`lib/` 目录），`-Denable-tls=true` 启用。
 
 本机自测里的 QPS 只能说明“小规模正确性和稳定性”。客户端和服务端在同一台
 机器上竞争 CPU，默认 benchmark 也只有 `50 x 100` 个 keep-alive 请求。要做
