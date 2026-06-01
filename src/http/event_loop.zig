@@ -187,8 +187,7 @@ pub fn dispatchCqes(self: *AsyncServer, cqes: []linux.io_uring_cqe, n: usize) vo
 
             if (conn_ptr.state == .reading or conn_ptr.state == .processing) {
                 self.onReadComplete(conn_id, res, user_data, cqe.flags);
-            }
-            if (build_options.tls_enabled and conn_ptr.state == .tls_handshaking) {
+            } else if (build_options.tls_enabled and conn_ptr.state == .tls_handshaking) {
                 onTlsHandshake(self, conn_id, conn_ptr, res, user_data, cqe.flags);
             } else if (conn_ptr.state == .receiving_body) {
                 self.onBodyChunk(conn_id, res);
