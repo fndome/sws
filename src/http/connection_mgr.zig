@@ -43,6 +43,10 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
                 conn.tls = null;
             }
         }
+        if (!conn.read_buf_recycled and conn.read_bid != 0) {
+            conn.read_buf_recycled = true;
+            self.buffer_pool.markReplenish(conn.read_bid);
+        }
         if (conn.ws_token) |t| {
             self.allocator.free(t);
             conn.ws_token = null;

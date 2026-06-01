@@ -255,6 +255,14 @@ fn retryPendingWrites(self: *AsyncServer) void {
                 self.submitWrite(conn_id, conn) catch |err| {
                     if (err != error.WriteInFlight) break;
                 };
+            } else if (build_options.tls_enabled and conn.state == .tls_handshaking) {
+                if (conn.tls) |tls_stream| {
+                    if (tls_stream.pending_handshake_write) {
+                        submitTlsHandshakeWrite(self, conn_id, conn, tls_stream.handshakeOutput()) catch |err2| {
+                            if (err2 != error.RingFull) break;
+                        };
+                    }
+                }
             }
         }
     }
@@ -390,8 +398,15 @@ fn onTlsHandshake(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32,
                 conn.read_len = 0;
             }
             submitTlsHandshakeWrite(self, conn_id, conn, handshake_out) catch |err| {
-                logErr("submitTlsHandshakeWrite failed: {s}", .{@errorName(err)});
-                self.closeConn(conn_id, conn.fd);
+                if (err == error.RingFull) {
+                    self.pending_writes.append(self.allocator, conn_id) catch {
+                        logErr("submitTlsHandshakeWrite: pend queue full, close fd={d}", .{conn.fd});
+                        self.closeConn(conn_id, conn.fd);
+                    };
+                } else {
+                    logErr("submitTlsHandshakeWrite failed: {s}", .{@errorName(err)});
+                    self.closeConn(conn_id, conn.fd);
+                }
             };
         },
         .@"error" => {
@@ -408,15 +423,15 @@ fn onTlsHandshake(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32,
 }
 
 fn submitTlsHandshakeWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, data: []const u8) !void {
-    if (build_options.tls_enabled) {
     _ = conn_id;
     const tls_stream = conn.tls orelse return error.NoTlsStream;
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
     const fd = if (conn.fixed_index != 0xFFFF) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
+    tls_stream.pending_handshake_write = true;
     const sqe = self.ring.write(user_data, fd, data, 0) catch {
+        tls_stream.pending_handshake_write = false;
         return error.RingFull;
     };
     if (conn.fixed_index != 0xFFFF) sqe.flags |= linux.IOSQE_FIXED_FILE;
-    tls_stream.pending_handshake_write = true;
-    }
+}
 }

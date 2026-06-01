@@ -136,7 +136,15 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
     var reassembled_header = false;
     var combo: [MAX_REASSEMBLED_HEADER_SIZE]u8 = undefined;
 
-    if ((!build_options.tls_enabled or !tls_decrypted) and conn.pool_idx != 0xFFFFFFFF) {
+    if (conn.pool_idx != 0xFFFFFFFF) {
+        // TLS decrypt reuses plaintext buffer for effective_buf, but if header
+        // spans reads, the plaintext is on the stack and will be overwritten.
+        // Use heap save (slice to slot.line3.pending_buffer_ptr) for TLS path.
+        // For plaintext path, use io_uring bid as before.
+        if (!build_options.tls_enabled or !tls_decrypted or blk: {
+            const hw = sticker.httpWork(&self.pool.slots[conn.pool_idx]);
+            break :blk hw.pending_len > 0 and hw.pending_bid == 0 and slot.line3.pending_buffer_ptr != 0;
+        }) {
         const slot = &self.pool.slots[conn.pool_idx];
         const hw = sticker.httpWork(slot);
         if (hw.pending_len > 0 and (hw.pending_bid != 0 or slot.line3.pending_buffer_ptr != 0)) {
@@ -154,9 +162,9 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
                 break :blk self.buffer_pool.getReadBuf(hw.pending_bid)[0..prev_len];
             };
             const copy_prev_len = @min(prev_buf.len, combo.len);
-            const cur_len = @min(nread, combo.len - copy_prev_len);
+            const cur_len = @min(effective_nread, combo.len - copy_prev_len);
             @memcpy(combo[0..copy_prev_len], prev_buf[0..copy_prev_len]);
-            @memcpy(combo[copy_prev_len..][0..cur_len], read_buf[0..cur_len]);
+            @memcpy(combo[copy_prev_len..][0..cur_len], effective_buf[0..cur_len]);
             effective_buf = combo[0 .. copy_prev_len + cur_len];
             effective_nread = copy_prev_len + cur_len;
             reassembled_header = true;
@@ -165,6 +173,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             hw.pending_len = 0;
         }
     }
+    } // conn.pool_idx guard for header reassembly
 
     if (!build_options.tls_enabled or !tls_decrypted) {
         if (conn.read_len > 0 and conn.read_bid != pending_to_free) {
@@ -195,7 +204,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         if (conn.pool_idx != 0xFFFFFFFF) {
             const slot = &self.pool.slots[conn.pool_idx];
             const hw = sticker.httpWork(slot);
-            if (reassembled_header) {
+            if (reassembled_header or (build_options.tls_enabled and tls_decrypted and bid == 0)) {
                 savePendingHeaderCopy(self.allocator, slot, hw, effective_buf) catch {
                     self.buffer_pool.markReplenish(bid);
                     conn.read_bid = 0;
@@ -204,8 +213,9 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
                     self.respond(conn, 500, "Internal Server Error");
                     return;
                 };
-                // 修改原因：header 已经是多片段重组结果，当前 bid 只含最后一片，必须保存完整累计副本。
-                self.buffer_pool.markReplenish(bid);
+                if (!build_options.tls_enabled or !tls_decrypted) {
+                    self.buffer_pool.markReplenish(bid);
+                }
                 conn.read_bid = 0;
             } else {
                 hw.pending_bid = bid;
