@@ -63,6 +63,7 @@ pub const Connection = struct {
     active_list_pos: u32 = 0xFFFFFFFF,
     tls: ?*TlsStream = null,
     tls_write_len: u32 = 0,
+    tls_ciphertext: ?[]u8 = null,
 };
 
 /// WebSocket 写队列节点（单 IO 线程，无需原子操作）

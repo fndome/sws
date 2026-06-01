@@ -51,6 +51,7 @@ pub const RingSharedClient = struct {
     tls: ?*TlsStream = null,
     tls_handshaking: bool = false,
     tls_write_plaintext: u32 = 0,
+    tls_ciphertext_buf: ?[]u8 = null,
 
     pub const State = enum(u8) {
         idle,
@@ -95,6 +96,10 @@ pub const RingSharedClient = struct {
                 tls_stream.free();
                 self.allocator.destroy(tls_stream);
                 self.tls = null;
+            }
+            if (self.tls_ciphertext_buf) |buf| {
+                self.allocator.free(buf);
+                self.tls_ciphertext_buf = null;
             }
         }
         if (self.id != 0) {
@@ -224,8 +229,11 @@ pub const RingSharedClient = struct {
     fn writeTls(self: *RingSharedClient, data: []const u8) !void {
         if (build_options.tls_enabled) {
         const tls_stream = self.tls orelse return error.NotConnected;
-        var ciphertext_buf: [CLIENT_TLS_SEND_BUF]u8 = [_]u8{0} ** CLIENT_TLS_SEND_BUF;
-        const ciphertext_len = tls_stream.write(data, &ciphertext_buf) catch return error.TlsWriteFailed;
+        if (self.tls_ciphertext_buf == null) {
+            self.tls_ciphertext_buf = self.allocator.alloc(u8, CLIENT_TLS_SEND_BUF) catch return error.OutOfMemory;
+        }
+        var ciphertext_buf = self.tls_ciphertext_buf.?;
+        const ciphertext_len = tls_stream.write(data, ciphertext_buf) catch return error.TlsWriteFailed;
         if (ciphertext_len == 0) return;
         try self.write_buf.appendSlice(self.allocator, ciphertext_buf[0..ciphertext_len]);
         if (!self.writing) {
@@ -246,8 +254,11 @@ pub const RingSharedClient = struct {
         }
         const remaining = self.write_buf.items[self.write_offset..];
         const to_encrypt = if (remaining.len > 16384) remaining[0..16384] else remaining;
-        var ciphertext_buf: [CLIENT_TLS_SEND_BUF]u8 = [_]u8{0} ** CLIENT_TLS_SEND_BUF;
-        const ciphertext_len = tls_stream.write(to_encrypt, &ciphertext_buf) catch return error.TlsWriteFailed;
+        if (self.tls_ciphertext_buf == null) {
+            self.tls_ciphertext_buf = self.allocator.alloc(u8, CLIENT_TLS_SEND_BUF) catch return error.OutOfMemory;
+        }
+        var ciphertext_buf = self.tls_ciphertext_buf.?;
+        const ciphertext_len = tls_stream.write(to_encrypt, ciphertext_buf) catch return error.TlsWriteFailed;
         if (ciphertext_len == 0) return;
         // Track how much plaintext this chunk consumed for offset advancement on CQE
         self.tls_write_plaintext = @intCast(to_encrypt.len);

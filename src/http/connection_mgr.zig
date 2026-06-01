@@ -42,6 +42,10 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
                 self.allocator.destroy(tls_stream);
                 conn.tls = null;
             }
+            if (conn.tls_ciphertext) |buf| {
+                self.allocator.free(buf);
+                conn.tls_ciphertext = null;
+            }
         }
         if (!conn.read_buf_recycled and conn.read_bid != 0) {
             conn.read_buf_recycled = true;

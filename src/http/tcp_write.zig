@@ -190,7 +190,11 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
 
     const header_len = @min(conn.write_headers_len, resp_buf.len);
 
-    var ciphertext_buf: [16384 + 2048]u8 = [_]u8{0} ** (16384 + 2048);
+    const max_ciphertext = @as(usize, 16384) + 2048;
+    if (conn.tls_ciphertext == null) {
+        conn.tls_ciphertext = self.allocator.alloc(u8, max_ciphertext) catch return error.OutOfMemory;
+    }
+    var ciphertext_buf = conn.tls_ciphertext.?;
     var plaintext_buf: [16384]u8 = [_]u8{0} ** 16384;
     var plaintext_len: usize = 0;
 
@@ -216,7 +220,7 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
 
     if (plaintext_len == 0) return;
 
-    const ciphertext_len = tls_stream.write(plaintext_buf[0..plaintext_len], &ciphertext_buf) catch {
+    const ciphertext_len = tls_stream.write(plaintext_buf[0..plaintext_len], ciphertext_buf) catch {
         return error.TlsWriteFailed;
     };
     if (ciphertext_len == 0) return;
@@ -277,6 +281,10 @@ fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: 
         if (conn.response_buf) |buf| {
             self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
             conn.response_buf = null;
+        }
+        if (conn.tls_ciphertext) |buf| {
+            self.allocator.free(buf);
+            conn.tls_ciphertext = null;
         }
         if (self.ws_server.getActive(conn_id) != null) {
             conn.keep_alive = true;
