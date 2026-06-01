@@ -381,6 +381,10 @@ pub const AsyncServer = struct {
                         tls_stream.free();
                         self.allocator.destroy(tls_stream);
                     }
+                    if (conn.tls_ciphertext) |buf| {
+                        self.allocator.free(buf);
+                        conn.tls_ciphertext = null;
+                    }
                 }
                 if (conn.write_body) |b| self.allocator.free(b);
                 if (conn.ws_token) |t| self.allocator.free(t);
