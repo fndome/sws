@@ -90,6 +90,17 @@ pub const RingSharedClient = struct {
         return self;
     }
 
+    pub fn resetForReuse(self: *RingSharedClient) void {
+        self.write_offset = 0;
+        self.write_buf.clearRetainingCapacity();
+        self.writing = false;
+        if (build_options.tls_enabled) {
+            if (self.tls) |tls_stream| {
+                tls_stream.reset();
+            }
+        }
+    }
+
     pub fn deinit(self: *RingSharedClient) void {
         if (build_options.tls_enabled) {
             if (self.tls) |tls_stream| {

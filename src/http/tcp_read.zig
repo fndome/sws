@@ -206,7 +206,9 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             const hw = sticker.httpWork(slot);
             if (reassembled_header or (build_options.tls_enabled and tls_decrypted and bid == 0)) {
                 savePendingHeaderCopy(self.allocator, slot, hw, effective_buf) catch {
-                    self.buffer_pool.markReplenish(bid);
+                    if (bid != 0) {
+                        self.buffer_pool.markReplenish(bid);
+                    }
                     conn.read_bid = 0;
                     conn.read_len = 0;
                     conn.keep_alive = false;

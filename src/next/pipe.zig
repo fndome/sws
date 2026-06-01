@@ -80,6 +80,7 @@ pub const Pipe = struct {
     pub fn reset(self: *Pipe) void {
         self.read_buf.clearRetainingCapacity();
         self.write_buf.clearRetainingCapacity();
+        self.stream.resetForReuse();
     }
 
     pub const Reader = struct {

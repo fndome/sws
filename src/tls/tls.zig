@@ -98,6 +98,10 @@ pub const TlsStream = struct {
         self.* = undefined;
     }
 
+    pub fn reset(self: *TlsStream) void {
+        self.saved_ciphertext_len = 0;
+    }
+
     pub fn handshakeAdvance(self: *TlsStream, in_data: ?[]const u8) !HandshakeStep {
         if (self.ready_cipher) |cipher| {
             if (in_data) |data| {
@@ -187,6 +191,7 @@ pub const TlsStream = struct {
             .connected => |*conn| {
                 if (self.saved_ciphertext_len > 0) {
                     const res = conn.decrypt(self.saved_ciphertext[0..self.saved_ciphertext_len], plaintext) catch |err| {
+                        self.saved_ciphertext_len = 0;
                         return tlsErrorToReadError(err);
                     };
                     if (res.closed) return error.TlsConnectionClosed;
@@ -195,6 +200,7 @@ pub const TlsStream = struct {
                 }
 
                 const res = conn.decrypt(ciphertext, plaintext) catch |err| {
+                    self.saved_ciphertext_len = 0;
                     return tlsErrorToReadError(err);
                 };
                 if (res.closed) return error.TlsConnectionClosed;
