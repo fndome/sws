@@ -434,4 +434,3 @@ fn submitTlsHandshakeWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, 
     };
     if (conn.fixed_index != 0xFFFF) sqe.flags |= linux.IOSQE_FIXED_FILE;
 }
-}

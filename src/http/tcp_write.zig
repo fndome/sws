@@ -189,8 +189,6 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
     }
 
     const header_len = @min(conn.write_headers_len, resp_buf.len);
-    const body_len = if (conn.write_body) |b| b.len else 0;
-    const total = header_len + body_len;
 
     var ciphertext_buf: [16384 + 2048]u8 = [_]u8{0} ** (16384 + 2048);
     var plaintext_buf: [16384]u8 = [_]u8{0} ** 16384;
@@ -203,8 +201,9 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
         plaintext_len += n;
     }
 
-    if (conn.write_body) |body| and plaintext_len < plaintext_buf.len {
-        const body_start = if (conn.write_offset > header_len)
+    if (conn.write_body) |body| {
+        if (plaintext_len < plaintext_buf.len) {
+            const body_start = if (conn.write_offset > header_len)
             conn.write_offset - header_len
         else
             0;
@@ -212,6 +211,7 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
         const n = @min(body_part.len, plaintext_buf.len - plaintext_len);
         @memcpy(plaintext_buf[plaintext_len..][0..n], body_part[0..n]);
         plaintext_len += n;
+        }
     }
 
     if (plaintext_len == 0) return;

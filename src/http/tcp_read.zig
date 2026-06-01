@@ -143,7 +143,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         // For plaintext path, use io_uring bid as before.
         if (!build_options.tls_enabled or !tls_decrypted or blk: {
             const hw = sticker.httpWork(&self.pool.slots[conn.pool_idx]);
-            break :blk hw.pending_len > 0 and hw.pending_bid == 0 and slot.line3.pending_buffer_ptr != 0;
+            break :blk hw.pending_len > 0 and hw.pending_bid == 0 and self.pool.slots[conn.pool_idx].line3.pending_buffer_ptr != 0;
         }) {
         const slot = &self.pool.slots[conn.pool_idx];
         const hw = sticker.httpWork(slot);

@@ -50,6 +50,7 @@ pub const RingSharedClient = struct {
     fixed_index: u16 = 0xFFFF,
     tls: ?*TlsStream = null,
     tls_handshaking: bool = false,
+    tls_write_plaintext: u32 = 0,
 
     pub const State = enum(u8) {
         idle,
@@ -235,26 +236,27 @@ pub const RingSharedClient = struct {
 
     fn flushTlsWrites(self: *RingSharedClient) !void {
         const tls_stream = self.tls orelse return error.NotConnected;
-        while (self.write_offset < self.write_buf.items.len) {
-            const plaintext = self.write_buf.items[self.write_offset..];
-            const to_encrypt = if (plaintext.len > 16384) plaintext[0..16384] else plaintext;
-            var ciphertext_buf: [CLIENT_TLS_SEND_BUF]u8 = [_]u8{0} ** CLIENT_TLS_SEND_BUF;
-            const ciphertext_len = tls_stream.write(to_encrypt, &ciphertext_buf) catch return error.TlsWriteFailed;
-            if (ciphertext_len == 0) return;
-            // Encrypt one chunk and write ciphertext. write_offset tracks plaintext position.
-            self.write_offset += to_encrypt.len;
-            // Write ciphertext to socket
-            const use_fixed = self.fixed_index != 0xFFFF;
-            const fd_or_idx = if (use_fixed) @as(i32, @intCast(self.fixed_index)) else self.fd;
-            const sqe = try self.rs.ringPtr().write(self.id | CLIENT_WRITE_USER_DATA_FLAG, fd_or_idx, ciphertext_buf[0..ciphertext_len], 0);
-            if (use_fixed) sqe.flags |= linux.IOSQE_FIXED_FILE;
-            self.writing = true;
+        if (self.write_offset >= self.write_buf.items.len) {
+            // All plaintext flushed: reset write_buf and submit read for response
+            self.write_offset = 0;
+            self.write_buf.clearRetainingCapacity();
+            self.writing = false;
+            try self.submitRead();
             return;
         }
-        // All queued data flushed
-        self.write_offset = 0;
-        self.write_buf.clearRetainingCapacity();
-        self.writing = false;
+        const remaining = self.write_buf.items[self.write_offset..];
+        const to_encrypt = if (remaining.len > 16384) remaining[0..16384] else remaining;
+        var ciphertext_buf: [CLIENT_TLS_SEND_BUF]u8 = [_]u8{0} ** CLIENT_TLS_SEND_BUF;
+        const ciphertext_len = tls_stream.write(to_encrypt, &ciphertext_buf) catch return error.TlsWriteFailed;
+        if (ciphertext_len == 0) return;
+        // Track how much plaintext this chunk consumed for offset advancement on CQE
+        self.tls_write_plaintext = @intCast(to_encrypt.len);
+        // Write ciphertext to socket
+        const use_fixed = self.fixed_index != 0xFFFF;
+        const fd_or_idx = if (use_fixed) @as(i32, @intCast(self.fixed_index)) else self.fd;
+        const sqe = try self.rs.ringPtr().write(self.id | CLIENT_WRITE_USER_DATA_FLAG, fd_or_idx, ciphertext_buf[0..ciphertext_len], 0);
+        if (use_fixed) sqe.flags |= linux.IOSQE_FIXED_FILE;
+        self.writing = true;
     }
 
     fn writeRawTls(self: *RingSharedClient, data: []const u8) !void {
@@ -393,14 +395,14 @@ pub const RingSharedClient = struct {
                         self.onClose();
                         return;
                     }
-                    self.write_offset += @intCast(res);
-                    if (build_options.tls_enabled) {
-                        if (self.tls_handshaking) {
-                            if (self.tls) |tls_stream| {
-                                const step = tls_stream.handshakeAdvance(null) catch {
-                                    self.onClose();
-                                    return;
-                                };
+                    if (build_options.tls_enabled and self.tls_handshaking) {
+                        // TLS handshake write CQE: advance ciphertext offset, continue handshake
+                        self.write_offset += @intCast(res);
+                        if (self.tls) |tls_stream| {
+                            const step = tls_stream.handshakeAdvance(null) catch {
+                                self.onClose();
+                                return;
+                            };
                             switch (step) {
                                 .done => {
                                     self.tls_handshaking = false;
@@ -430,10 +432,25 @@ pub const RingSharedClient = struct {
                                 },
                             }
                         }
+                        self.flushWrite() catch {
+                            self.onClose();
+                        };
+                    } else if (build_options.tls_enabled and self.tls != null and !self.tls_handshaking) {
+                        // TLS data write CQE: advance by PLAINTEXT consumed, continue encrypting
+                        if (self.tls_write_plaintext > 0) {
+                            self.write_offset += self.tls_write_plaintext;
+                            self.tls_write_plaintext = 0;
+                        }
+                        self.flushTlsWrites() catch {
+                            self.onClose();
+                        };
+                    } else {
+                        // Plaintext write CQE
+                        self.write_offset += @intCast(res);
+                        self.flushWrite() catch {
+                            self.onClose();
+                        };
                     }
-                    self.flushWrite() catch {
-                        self.onClose();
-                    };
                 } else {
                     if (res == 0) {
                         self.onClose();
