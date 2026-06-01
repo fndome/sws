@@ -207,6 +207,10 @@ pub const RingSharedClient = struct {
         if (self.state != .connected) return error.NotConnected;
         if (build_options.tls_enabled) {
             if (self.tls != null) {
+                if (self.tls_handshaking) {
+                    try self.write_buf.appendSlice(self.allocator, data);
+                    return;
+                }
                 return self.writeTls(data);
             }
         }
@@ -226,7 +230,31 @@ pub const RingSharedClient = struct {
         if (!self.writing) {
             try self.flushWrite();
         }
+    }
+    }
+
+    fn flushTlsWrites(self: *RingSharedClient) !void {
+        const tls_stream = self.tls orelse return error.NotConnected;
+        while (self.write_offset < self.write_buf.items.len) {
+            const plaintext = self.write_buf.items[self.write_offset..];
+            const to_encrypt = if (plaintext.len > 16384) plaintext[0..16384] else plaintext;
+            var ciphertext_buf: [CLIENT_TLS_SEND_BUF]u8 = [_]u8{0} ** CLIENT_TLS_SEND_BUF;
+            const ciphertext_len = tls_stream.write(to_encrypt, &ciphertext_buf) catch return error.TlsWriteFailed;
+            if (ciphertext_len == 0) return;
+            // Encrypt one chunk and write ciphertext. write_offset tracks plaintext position.
+            self.write_offset += to_encrypt.len;
+            // Write ciphertext to socket
+            const use_fixed = self.fixed_index != 0xFFFF;
+            const fd_or_idx = if (use_fixed) @as(i32, @intCast(self.fixed_index)) else self.fd;
+            const sqe = try self.rs.ringPtr().write(self.id | CLIENT_WRITE_USER_DATA_FLAG, fd_or_idx, ciphertext_buf[0..ciphertext_len], 0);
+            if (use_fixed) sqe.flags |= linux.IOSQE_FIXED_FILE;
+            self.writing = true;
+            return;
         }
+        // All queued data flushed
+        self.write_offset = 0;
+        self.write_buf.clearRetainingCapacity();
+        self.writing = false;
     }
 
     fn writeRawTls(self: *RingSharedClient, data: []const u8) !void {
@@ -373,28 +401,33 @@ pub const RingSharedClient = struct {
                                     self.onClose();
                                     return;
                                 };
-                                switch (step) {
-                                    .done => {
-                                        self.tls_handshaking = false;
-                                    },
-                                    .want_write => {
-                                        const handshake_out = tls_stream.handshakeOutput();
-                                        self.writeRawTls(handshake_out) catch {
+                            switch (step) {
+                                .done => {
+                                    self.tls_handshaking = false;
+                                    if (self.write_buf.items.len > self.write_offset) {
+                                        self.flushTlsWrites() catch {
                                             self.onClose();
+                                            return;
                                         };
-                                        return;
-                                    },
-                                    .want_read => {
-                                        self.submitRead() catch {
-                                            self.onClose();
-                                        };
-                                        return;
-                                    },
-                                    .@"error" => {
+                                    }
+                                },
+                                .want_write => {
+                                    const handshake_out = tls_stream.handshakeOutput();
+                                    self.writeRawTls(handshake_out) catch {
                                         self.onClose();
-                                        return;
-                                    },
-                                }
+                                    };
+                                    return;
+                                },
+                                .want_read => {
+                                    self.submitRead() catch {
+                                        self.onClose();
+                                    };
+                                    return;
+                                },
+                                .@"error" => {
+                                    self.onClose();
+                                    return;
+                                },
                             }
                         }
                     }
@@ -417,6 +450,12 @@ pub const RingSharedClient = struct {
                                 switch (step) {
                                     .done => {
                                         self.tls_handshaking = false;
+                                        if (self.write_buf.items.len > self.write_offset) {
+                                            self.flushTlsWrites() catch {
+                                                self.onClose();
+                                                return;
+                                            };
+                                        }
                                     },
                                     .want_write => {
                                         const handshake_out = tls_stream.handshakeOutput();
