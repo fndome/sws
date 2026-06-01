@@ -458,14 +458,20 @@ pub const RingSharedClient = struct {
                             self.onClose();
                         };
                     } else if (build_options.tls_enabled and self.tls != null and !self.tls_handshaking) {
-                        // TLS data write CQE: advance by PLAINTEXT consumed, continue encrypting
                         if (self.tls_write_plaintext > 0) {
+                            // flushTlsWrites path: advance by PLAINTEXT consumed
                             self.write_offset += self.tls_write_plaintext;
                             self.tls_write_plaintext = 0;
+                            self.flushTlsWrites() catch {
+                                self.onClose();
+                            };
+                        } else {
+                            // writeTls path: ciphertext was appended to write_buf, advance by CIPHERTEXT bytes
+                            self.write_offset += @intCast(res);
+                            self.flushWrite() catch {
+                                self.onClose();
+                            };
                         }
-                        self.flushTlsWrites() catch {
-                            self.onClose();
-                        };
                     } else {
                         // Plaintext write CQE
                         self.write_offset += @intCast(res);
