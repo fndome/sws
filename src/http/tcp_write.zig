@@ -189,66 +189,45 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
     }
 
     const header_len = @min(conn.write_headers_len, resp_buf.len);
+    const body_len = if (conn.write_body) |b| b.len else 0;
+    const total = header_len + body_len;
 
     var ciphertext_buf: [16384 + 2048]u8 = [_]u8{0} ** (16384 + 2048);
+    var plaintext_buf: [16384]u8 = [_]u8{0} ** 16384;
+    var plaintext_len: usize = 0;
 
-    if (conn.write_body) |body| {
-        const total = header_len + body.len;
-        if (conn.write_offset >= total) return;
-
-        var plaintext_buf: [16384]u8 = [_]u8{0} ** 16384;
-        var plaintext_offset: usize = 0;
-
-        if (conn.write_offset < header_len) {
-            const hdr_part = resp_buf[conn.write_offset..header_len];
-            const to_copy = @min(hdr_part.len, plaintext_buf.len);
-            @memcpy(plaintext_buf[0..to_copy], hdr_part[0..to_copy]);
-            plaintext_offset += to_copy;
-        }
-
-        if (plaintext_offset < plaintext_buf.len) {
-            const body_start = if (conn.write_offset > header_len)
-                conn.write_offset - header_len
-            else
-                0;
-            if (body_start < body.len) {
-                const body_part = body[body_start..];
-                const to_copy = @min(body_part.len, plaintext_buf.len - plaintext_offset);
-                @memcpy(plaintext_buf[plaintext_offset..][0..to_copy], body_part[0..to_copy]);
-                plaintext_offset += to_copy;
-            }
-        }
-
-        const plaintext = plaintext_buf[0..plaintext_offset];
-        const ciphertext_len = tls_stream.write(plaintext, &ciphertext_buf) catch {
-            return error.TlsWriteFailed;
-        };
-        if (ciphertext_len == 0) return;
-
-        slot.line4.writev_in_flight = 1;
-        _ = self.ring.write(user_data, fd, ciphertext_buf[0..ciphertext_len], 0) catch {
-            slot.line4.writev_in_flight = 0;
-            try queuePendingWrite(self, conn_id, conn);
-            return;
-        };
-        conn.tls_write_len = @intCast(ciphertext_len);
-    } else {
-        if (conn.write_offset >= header_len) return;
-        const plaintext = resp_buf[conn.write_offset..header_len];
-        const to_encrypt = if (plaintext.len > 16384) plaintext[0..16384] else plaintext;
-        const ciphertext_len = tls_stream.write(to_encrypt, &ciphertext_buf) catch {
-            return error.TlsWriteFailed;
-        };
-        if (ciphertext_len == 0) return;
-
-        slot.line4.writev_in_flight = 1;
-        _ = self.ring.write(user_data, fd, ciphertext_buf[0..ciphertext_len], 0) catch {
-            slot.line4.writev_in_flight = 0;
-            try queuePendingWrite(self, conn_id, conn);
-            return;
-        };
-        conn.tls_write_len = @intCast(ciphertext_len);
+    if (conn.write_offset < header_len) {
+        const hdr_part = resp_buf[conn.write_offset..header_len];
+        const n = @min(hdr_part.len, plaintext_buf.len - plaintext_len);
+        @memcpy(plaintext_buf[plaintext_len..][0..n], hdr_part[0..n]);
+        plaintext_len += n;
     }
+
+    if (conn.write_body) |body| and plaintext_len < plaintext_buf.len {
+        const body_start = if (conn.write_offset > header_len)
+            conn.write_offset - header_len
+        else
+            0;
+        const body_part = body[body_start..];
+        const n = @min(body_part.len, plaintext_buf.len - plaintext_len);
+        @memcpy(plaintext_buf[plaintext_len..][0..n], body_part[0..n]);
+        plaintext_len += n;
+    }
+
+    if (plaintext_len == 0) return;
+
+    const ciphertext_len = tls_stream.write(plaintext_buf[0..plaintext_len], &ciphertext_buf) catch {
+        return error.TlsWriteFailed;
+    };
+    if (ciphertext_len == 0) return;
+
+    slot.line4.writev_in_flight = 1;
+    _ = self.ring.write(user_data, fd, ciphertext_buf[0..ciphertext_len], 0) catch {
+        slot.line4.writev_in_flight = 0;
+        try queuePendingWrite(self, conn_id, conn);
+        return;
+    };
+    conn.tls_write_len = @intCast(ciphertext_len);
     }
 }
 
@@ -279,43 +258,61 @@ fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: 
     const body_len = if (conn.write_body) |b| b.len else 0;
     const total = header_len + body_len;
 
-    conn.write_offset = total;
+    // Advance write_offset by the plaintext that was encrypted in submitTlsWrite.
+    // submitTlsWrite packs up to 16384 bytes of plaintext per chunk.
+    const remaining = if (total > conn.write_offset) total - conn.write_offset else 0;
+    const chunk_plaintext = @min(remaining, @as(usize, 16384));
+    conn.write_offset += chunk_plaintext;
 
-    conn.write_retries = 0;
-    if (conn.pool_idx != 0xFFFFFFFF) {
-        self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
-    }
-    if (conn.write_body) |b| {
-        self.allocator.free(b);
-        conn.write_body = null;
-    }
-    conn.write_start_ms = 0;
-    if (conn.response_buf) |buf| {
-        self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
-        conn.response_buf = null;
-    }
-    if (self.ws_server.getActive(conn_id) != null) {
-        conn.keep_alive = true;
-        conn.write_offset = 0;
-        conn.write_headers_len = 0;
-        conn.state = .ws_reading;
-        self.submitRead(conn_id, conn) catch |err| {
-            logErr("submitRead failed for WS upgrade fd {}: {s}", .{ conn.fd, @errorName(err) });
-            self.closeConn(conn_id, conn.fd);
-        };
-    } else if (conn.keep_alive) {
+    if (conn.write_offset >= total) {
+        conn.write_retries = 0;
+        if (conn.pool_idx != 0xFFFFFFFF) {
+            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+        }
+        if (conn.write_body) |b| {
+            self.allocator.free(b);
+            conn.write_body = null;
+        }
         conn.write_start_ms = 0;
-        conn.state = .reading;
-        conn.read_len = 0;
-        conn.write_offset = 0;
-        conn.write_headers_len = 0;
-        conn.last_active_ms = milliTimestamp(self.io);
-        self.submitRead(conn_id, conn) catch |err| {
-            logErr("submitRead failed for keep-alive fd {}: {s}", .{ conn.fd, @errorName(err) });
+        if (conn.response_buf) |buf| {
+            self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
+            conn.response_buf = null;
+        }
+        if (self.ws_server.getActive(conn_id) != null) {
+            conn.keep_alive = true;
+            conn.write_offset = 0;
+            conn.write_headers_len = 0;
+            conn.state = .ws_reading;
+            self.submitRead(conn_id, conn) catch |err| {
+                logErr("submitRead failed for WS upgrade fd {}: {s}", .{ conn.fd, @errorName(err) });
+                self.closeConn(conn_id, conn.fd);
+            };
+        } else if (conn.keep_alive) {
+            conn.write_start_ms = 0;
+            conn.state = .reading;
+            conn.read_len = 0;
+            conn.write_offset = 0;
+            conn.write_headers_len = 0;
+            conn.last_active_ms = milliTimestamp(self.io);
+            self.submitRead(conn_id, conn) catch |err| {
+                logErr("submitRead failed for keep-alive fd {}: {s}", .{ conn.fd, @errorName(err) });
+                self.closeConn(conn_id, conn.fd);
+            };
+        } else {
+            self.closeConn(conn_id, conn.fd);
+        }
+    } else {
+        // More plaintext to encrypt, submit next chunk
+        if (conn.pool_idx != 0xFFFFFFFF) {
+            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+        }
+        self.submitWrite(conn_id, conn) catch |err| {
+            logErr("submitWrite failed for TLS chunk fd {}: {s}", .{ conn.fd, @errorName(err) });
+            if (conn.pool_idx != 0xFFFFFFFF) {
+                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+            }
             self.closeConn(conn_id, conn.fd);
         };
-    } else {
-        self.closeConn(conn_id, conn.fd);
     }
-}
+    }
 }
