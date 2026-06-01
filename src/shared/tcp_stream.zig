@@ -325,6 +325,12 @@ pub const RingSharedClient = struct {
         const tls_stream = try self.allocator.create(TlsStream);
         errdefer self.allocator.destroy(tls_stream);
         tls_stream.* = try TlsStream.new(tls_config);
+        // Upgrade read buffer for max TLS ciphertext record (16645 > 16384)
+        if (self.read_buf.len < CLIENT_TLS_RECV_BUF) {
+            const new_buf = try self.allocator.alloc(u8, CLIENT_TLS_RECV_BUF);
+            self.allocator.free(self.read_buf);
+            self.read_buf = new_buf;
+        }
         self.tls = tls_stream;
         self.tls_handshaking = true;
 
