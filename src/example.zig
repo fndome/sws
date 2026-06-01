@@ -181,7 +181,7 @@ const Example = struct {
         const bind_addr = try std.fmt.allocPrint(alloc, "0.0.0.0:{d}", .{port});
         defer alloc.free(bind_addr);
 
-        var server = try AsyncServer.init(alloc, io, bind_addr, null, 64, null);
+        var server = try AsyncServer.init(alloc, io, bind_addr, null, 64, null, .{});
         defer server.deinit();
 
         server.config(.idle_timeout_ms, 30000);

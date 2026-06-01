@@ -177,8 +177,14 @@ pub const AsyncServer = struct {
         idle_timeout_ms: u64 = constants.IDLE_TIMEOUT_MS,
         write_timeout_ms: u64 = constants.WRITE_TIMEOUT_MS,
         fiber_stack_size_kb: u16 = 256,
+        max_connections: u32 = constants.MAX_CONNECTIONS,
         io_cpu: ?u6 = null,
         log_cpu: ?u6 = null,
+    };
+
+    pub const InitConfig = struct {
+        max_connections: u32 = constants.MAX_CONNECTIONS,
+        buffer_pool_size: u32 = constants.BUFFER_POOL_SIZE,
     };
 
     pub const ConfigKey = enum {
@@ -194,6 +200,7 @@ pub const AsyncServer = struct {
         max_path_length,
         idle_timeout_ms,
         write_timeout_ms,
+        max_connections,
         io_cpu,
         log_cpu,
     };
@@ -212,12 +219,13 @@ pub const AsyncServer = struct {
             .max_path_length => self.cfg.max_path_length = @intCast(value),
             .idle_timeout_ms => self.cfg.idle_timeout_ms = @intCast(value),
             .write_timeout_ms => self.cfg.write_timeout_ms = @intCast(value),
+            .max_connections => self.cfg.max_connections = @intCast(value),
             .io_cpu => self.cfg.io_cpu = if (value < 0) null else @intCast(value),
             .log_cpu => self.cfg.log_cpu = if (value < 0) null else @intCast(value),
         }
     }
 
-    pub fn init(allocator: Allocator, io: std.Io, listen_addr: []const u8, app_ctx: ?*anyopaque, fiber_stack_size_kb: u16, tls_auth: ?TlsAuth) !Self {
+    pub fn init(allocator: Allocator, io: std.Io, listen_addr: []const u8, app_ctx: ?*anyopaque, fiber_stack_size_kb: u16, tls_auth: ?TlsAuth, init_cfg: InitConfig) !Self {
         const colon = std.mem.indexOfScalar(u8, listen_addr, ':') orelse return error.InvalidListenAddress;
         const ip_str = listen_addr[0..colon];
         const port_str = listen_addr[colon + 1 ..];
@@ -282,10 +290,11 @@ pub const AsyncServer = struct {
             use_ff = true;
         } else |_| {}
 
-        var bp = try BufferPool.init(allocator, BUFFER_POOL_SIZE);
+        var bp = try BufferPool.init(allocator, init_cfg.buffer_pool_size);
         errdefer bp.deinit();
 
         const kb = if (fiber_stack_size_kb == 0) @as(u16, 256) else fiber_stack_size_kb;
+        var cfg = Config{ .fiber_stack_size_kb = kb, .max_connections = init_cfg.max_connections, .buffer_pool_size = init_cfg.buffer_pool_size };
         const stack_size = @as(u32, @intCast(kb)) * 1024;
         const shared_stack = try allocator.alloc(u8, stack_size);
         errdefer allocator.free(shared_stack);
@@ -297,7 +306,7 @@ pub const AsyncServer = struct {
         var dns_resolver = try DnsResolver.init(allocator, &ring, &io_registry, io, ns_ip);
         errdefer dns_resolver.deinit();
 
-        var conn_pool = try StackPool(StackSlot, constants.MAX_CONNECTIONS).init(allocator);
+        var conn_pool = try StackPool(StackSlot, cfg.max_connections).init(allocator);
         errdefer conn_pool.deinit(allocator);
         conn_pool.warmup();
 
@@ -331,7 +340,7 @@ pub const AsyncServer = struct {
             .middlewares = mw_store,
             .respond_middlewares = respond_mw_store,
             .handlers = std.StringHashMap(Handler).init(allocator),
-            .cfg = Config{ .fiber_stack_size_kb = kb },
+            .cfg = cfg,
             .io_pinned = false,
             .next = null,
             .submit_registry = SubmitQueueRegistry.init(allocator),
