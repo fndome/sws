@@ -331,7 +331,7 @@ test "connAlloc releases slot when connection map insert fails" {
         }
     };
 
-    var pool = try StackPool(StackSlot, 1).init(std.testing.allocator);
+    var pool = try StackPool(StackSlot).init(std.testing.allocator, 1);
     defer pool.deinit(std.testing.allocator);
     pool.warmup();
 
@@ -345,7 +345,7 @@ test "connAlloc releases slot when connection map insert fails" {
 }
 
 test "slotAlloc skips zero generation ids" {
-    var pool = try StackPool(StackSlot, 1).init(std.testing.allocator);
+    var pool = try StackPool(StackSlot).init(std.testing.allocator, 1);
     defer pool.deinit(std.testing.allocator);
     pool.warmup();
 

@@ -83,7 +83,7 @@ pub const AsyncServer = struct {
     next_conn_id: u64,
     connections: std.AutoHashMap(u64, Connection),
     /// StackPool array-indexed connection pool (migrating from AutoHashMap)
-    pool: StackPool(StackSlot, constants.MAX_CONNECTIONS),
+    pool: StackPool(StackSlot),
     /// Flat hash map: user_id → pool slot index (IM routing, L3-resident)
     user_map: ?std.AutoHashMap(u64, u32) = null,
     /// Monotonic generation ID for ghost-event defense
@@ -294,7 +294,7 @@ pub const AsyncServer = struct {
         errdefer bp.deinit();
 
         const kb = if (fiber_stack_size_kb == 0) @as(u16, 256) else fiber_stack_size_kb;
-        var cfg = Config{ .fiber_stack_size_kb = kb, .max_connections = init_cfg.max_connections, .buffer_pool_size = init_cfg.buffer_pool_size };
+        const cfg = Config{ .fiber_stack_size_kb = kb, .max_connections = init_cfg.max_connections, .buffer_pool_size = init_cfg.buffer_pool_size };
         const stack_size = @as(u32, @intCast(kb)) * 1024;
         const shared_stack = try allocator.alloc(u8, stack_size);
         errdefer allocator.free(shared_stack);
@@ -306,7 +306,7 @@ pub const AsyncServer = struct {
         var dns_resolver = try DnsResolver.init(allocator, &ring, &io_registry, io, ns_ip);
         errdefer dns_resolver.deinit();
 
-        var conn_pool = try StackPool(StackSlot, cfg.max_connections).init(allocator);
+        var conn_pool = try StackPool(StackSlot).init(allocator, cfg.max_connections);
         errdefer conn_pool.deinit(allocator);
         conn_pool.warmup();
 

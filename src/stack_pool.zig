@@ -5,17 +5,18 @@ const ConnState = @import("http/connection.zig").ConnState;
 
 /// StackPool: O(1) 连续数组连接池，替代 AutoHashMap。
 /// user_data = (gen_id << 32) | idx，防 FD 复用幽灵事件。
-pub fn StackPool(comptime T: type, comptime capacity: usize) type {
+pub fn StackPool(comptime T: type) type {
     return struct {
         const Self = @This();
 
         slots: []T,
         freelist: []u32,
         freelist_top: u32,
+        capacity: usize,
         /// 活跃槽位索引表，O(1) swap-remove。TTL 扫描只遍历此项。
         live: std.ArrayList(u32),
 
-        pub fn init(allocator: Allocator) !Self {
+        pub fn init(allocator: Allocator, capacity: usize) !Self {
             const slots = try allocator.alloc(T, capacity);
             errdefer allocator.free(slots);
             const freelist = try allocator.alloc(u32, capacity);
@@ -31,6 +32,7 @@ pub fn StackPool(comptime T: type, comptime capacity: usize) type {
                 .slots = slots,
                 .freelist = freelist,
                 .freelist_top = @intCast(capacity),
+                .capacity = capacity,
                 .live = live,
             };
         }
