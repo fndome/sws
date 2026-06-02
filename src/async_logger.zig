@@ -24,7 +24,7 @@ pub const AsyncLogger = struct {
     pub fn init(allocator: Allocator, log_cpu: ?u6) !*AsyncLogger {
         const self = try allocator.create(AsyncLogger);
         errdefer allocator.destroy(self);
-        const efd_raw = linux.eventfd(0, 0);
+        const efd_raw = linux.eventfd(0, linux.EFD.NONBLOCK);
         if (@as(isize, @bitCast(efd_raw)) < 0) return error.EventFdFailed;
         self.* = .{
             .ring = RingBuffer(LogEntry, RING_CAPACITY).init(),
@@ -61,8 +61,8 @@ pub const AsyncLogger = struct {
                 _ = linux.write(std.posix.STDERR_FILENO, entry.buf[0..entry.len].ptr, entry.len);
             }
             pfds[0] = .{ .fd = self.eventfd, .events = linux.POLL.IN, .revents = 0 };
-            _ = linux.poll(&pfds, pfds.len, -1);
-            if ((pfds[0].revents & linux.POLL.IN) != 0) {
+            const ret = linux.poll(&pfds, pfds.len, 1);
+            if (@as(isize, @bitCast(ret)) > 0 and (pfds[0].revents & linux.POLL.IN) != 0) {
                 var val: u64 = 0;
                 _ = linux.read(self.eventfd, @as([*]u8, @ptrCast(&val)), @sizeOf(u64));
             }
