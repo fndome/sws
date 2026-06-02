@@ -16,7 +16,10 @@
 		{
 			"names": [
 				"accept4",
+				"arch_prctl",
 				"bind",
+				"brk",
+				"clock_gettime",
 				"close",
 				"connect",
 				"epoll_create1",
@@ -26,6 +29,7 @@
 				"exit_group",
 				"fstat",
 				"ftruncate",
+				"futex",
 				"getdents64",
 				"getrandom",
 				"listen",
