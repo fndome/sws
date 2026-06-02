@@ -56,7 +56,7 @@ pub const AsyncLogger = struct {
                 _ = std.os.linux.write(std.posix.STDERR_FILENO, entry.buf[0..entry.len].ptr, entry.len);
             }
             if (!drained) {
-                std.Thread.yield() catch {};
+                std.time.sleep(10 * std.time.ns_per_ms);
             }
         }
 
