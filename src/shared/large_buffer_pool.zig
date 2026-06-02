@@ -32,8 +32,10 @@ pub fn BufferBlockPool(comptime block_size: usize, comptime capacity: usize) typ
         freelist: [capacity]usize,
         freelist_top: usize,
         states: [capacity]u8,
+        count: usize,
 
-        pub fn init(allocator: Allocator) !Self {
+        pub fn init(allocator: Allocator, runtime_capacity: usize) !Self {
+            if (runtime_capacity > capacity) return error.OutOfMemory;
             var blocks: [capacity][]u8 = undefined;
             var allocated: usize = 0;
             errdefer {
@@ -42,21 +44,22 @@ pub fn BufferBlockPool(comptime block_size: usize, comptime capacity: usize) typ
                 }
             }
             var freelist: [capacity]usize = undefined;
-            for (0..capacity) |i| {
+            for (0..runtime_capacity) |i| {
                 blocks[i] = try allocator.alloc(u8, block_size);
                 allocated += 1;
-                freelist[i] = capacity - 1 - i;
+                freelist[i] = runtime_capacity - 1 - i;
             }
             return Self{
                 .blocks = blocks,
                 .freelist = freelist,
-                .freelist_top = capacity,
+                .freelist_top = runtime_capacity,
                 .states = [_]u8{STATE_IDLE} ** capacity,
+                .count = runtime_capacity,
             };
         }
 
         pub fn deinit(self: *Self, allocator: Allocator) void {
-            for (self.blocks) |block| {
+            for (self.blocks[0..self.count]) |block| {
                 allocator.free(block);
             }
         }
@@ -73,7 +76,7 @@ pub fn BufferBlockPool(comptime block_size: usize, comptime capacity: usize) typ
         /// 若已是 IDLE → 双重释放，记录错误并跳过。
         /// IO 线程独占，无并发 — 不需要 CAS。
         pub fn release(self: *Self, buf: []u8) void {
-            for (self.blocks, 0..) |block, i| {
+            for (self.blocks[0..self.count], 0..) |block, i| {
                 if (block.ptr == buf.ptr) {
                     if (self.states[i] == STATE_IDLE) {
                         logErr("LargeBufferPool: double-free detected for block idx={d} ptr=0x{x}", .{ i, @intFromPtr(buf.ptr) });
@@ -99,7 +102,7 @@ test "BufferBlockPool.init frees partial blocks on allocation failure" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
     const allocator = failing_allocator.allocator();
 
-    try std.testing.expectError(error.OutOfMemory, BufferBlockPool(16, 4).init(allocator));
+    try std.testing.expectError(error.OutOfMemory, BufferBlockPool(16, 4).init(allocator, 4));
     try std.testing.expectEqual(failing_allocator.allocated_bytes, failing_allocator.freed_bytes);
     try std.testing.expectEqual(failing_allocator.allocations, failing_allocator.deallocations);
 }

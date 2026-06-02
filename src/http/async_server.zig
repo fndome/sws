@@ -185,6 +185,7 @@ pub const AsyncServer = struct {
     pub const InitConfig = struct {
         max_connections: u32 = constants.MAX_CONNECTIONS,
         buffer_pool_size: u32 = constants.BUFFER_POOL_SIZE,
+        large_pool_capacity: u32 = 64,
     };
 
     pub const ConfigKey = enum {
@@ -310,7 +311,9 @@ pub const AsyncServer = struct {
         errdefer conn_pool.deinit(allocator);
         conn_pool.warmup();
 
-        var large_pool = try LargeBufferPool(64).init(allocator);
+        var large_pool_cap = init_cfg.large_pool_capacity;
+        if (large_pool_cap == 0) large_pool_cap = 64;
+        var large_pool = try LargeBufferPool(64).init(allocator, large_pool_cap);
         errdefer large_pool.deinit(allocator);
 
         var user_map = std.AutoHashMap(u64, u32).init(allocator);
