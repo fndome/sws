@@ -55,14 +55,14 @@ pub const AsyncLogger = struct {
         }
 
         var pfds: [1]linux.pollfd = undefined;
-        pfds[0] = .{ .fd = self.eventfd, .events = linux.POLL.IN, .revents = 0 };
 
         while (!@atomicLoad(bool, &self.stop, .acquire)) {
             while (self.ring.tryPop()) |entry| {
                 _ = linux.write(std.posix.STDERR_FILENO, entry.buf[0..entry.len].ptr, entry.len);
             }
+            pfds[0] = .{ .fd = self.eventfd, .events = linux.POLL.IN, .revents = 0 };
             _ = linux.poll(&pfds, pfds.len, -1);
-            if (pfds[0].revents & linux.POLL.IN != 0) {
+            if ((pfds[0].revents & linux.POLL.IN) != 0) {
                 var val: u64 = 0;
                 _ = linux.read(self.eventfd, @as([*]u8, @ptrCast(&val)), @sizeOf(u64));
             }
