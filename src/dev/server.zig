@@ -1,11 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
+const c = std.c;
 
-// DevServer is for non-Linux development only. On Linux production,
-// build with sws.AsyncServer (io_uring). This comptime guard ensures
-// that accidentally importing DevServer on a Linux target produces
-// a clear compile-time error rather than a runtime surprise.
 comptime {
     if (builtin.os.tag == .linux) {
         @compileError("DevServer is for non-Linux development only. Use sws.AsyncServer on Linux.");
@@ -17,6 +14,7 @@ const RouteParam = @import("../http/context.zig").RouteParam;
 const Handler = @import("../http/types.zig").Handler;
 const Middleware = @import("../http/types.zig").Middleware;
 const MiddlewareStore = @import("../http/middleware_store.zig").MiddlewareStore;
+const WildcardEntry = @import("../http/middleware_store.zig").WildcardEntry;
 const helpers = @import("../http/http_helpers.zig");
 const upgrade = @import("../ws/upgrade.zig");
 const frame = @import("../ws/frame.zig");
@@ -98,40 +96,85 @@ fn matchParamRoute(route: ParamRoute, path: []const u8, params: *[MAX_PARAMS]Rou
     return if (seg_idx == route.segments.len) param_idx else null;
 }
 
+fn parseIp4Parts(ip_str: []const u8) ![4]u8 {
+    var parts: [4]u8 = undefined;
+    var it = std.mem.splitScalar(u8, ip_str, '.');
+    for (0..4) |i| {
+        const p = it.next() orelse return error.InvalidIp;
+        parts[i] = std.fmt.parseInt(u8, p, 10) catch return error.InvalidIp;
+    }
+    if (it.next() != null) return error.InvalidIp;
+    return parts;
+}
+
+fn ip4PartsToU32(parts: [4]u8) u32 {
+    return (@as(u32, parts[0]) << 24) | (@as(u32, parts[1]) << 16) | (@as(u32, parts[2]) << 8) | @as(u32, parts[3]);
+}
+
 pub const DevServer = struct {
     allocator: Allocator,
-    listener: std.net.Server,
+    listener_fd: c.fd_t,
+    port_: u16,
     handlers: std.StringHashMap(Handler),
     param_routes: std.ArrayList(ParamRoute),
     middlewares: MiddlewareStore,
     ws_server: WsServer,
-    ws_streams: std.AutoHashMap(u64, std.net.Stream),
+    ws_streams: std.AutoHashMap(u64, c.fd_t),
     shutdown: bool,
     next_conn_id: u64,
 
     pub fn init(allocator: Allocator, bind_addr: []const u8) !DevServer {
-        const addr = try std.net.Address.parseIp4(bind_addr, 0);
-        const listener = try addr.listen(.{
-            .reuse_address = true,
-            .force_nonblocking = false,
-        });
-        errdefer listener.deinit();
+        const colon = std.mem.indexOfScalar(u8, bind_addr, ':') orelse return error.InvalidListenAddress;
+        const ip_str = bind_addr[0..colon];
+        const port_str = bind_addr[colon + 1 ..];
+        const local_port = try std.fmt.parseInt(u16, port_str, 10);
+
+        const ip_parts = try parseIp4Parts(ip_str);
+        const fd = try posixSocket(c.AF.INET, c.SOCK.STREAM, 0);
+        errdefer _ = c.close(fd);
+
+        const one: c_int = 1;
+        _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.REUSEADDR, &one, @sizeOf(c_int));
+
+        var addr: extern struct {
+            family: c.sa_family_t,
+            port: u16,
+            addr: u32,
+            zero: [8]u8,
+        } = .{
+            .family = c.AF.INET,
+            .port = std.mem.nativeToBig(u16, local_port),
+            .addr = ip4PartsToU32(ip_parts),
+            .zero = [_]u8{0} ** 8,
+        };
+        if (c.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) != 0) {
+            return error.BindFailed;
+        }
+        if (c.listen(fd, 128) != 0) {
+            return error.ListenFailed;
+        }
 
         return DevServer{
             .allocator = allocator,
-            .listener = listener,
+            .listener_fd = fd,
+            .port_ = local_port,
             .handlers = std.StringHashMap(Handler).init(allocator),
             .param_routes = std.ArrayList(ParamRoute).empty,
-            .middlewares = MiddlewareStore.init(allocator),
+            .middlewares = .{
+                .has_global = false,
+                .global = std.ArrayList(Middleware).empty,
+                .precise = std.StringHashMap(std.ArrayList(Middleware)).init(allocator),
+                .wildcard = std.ArrayList(WildcardEntry).empty,
+            },
             .ws_server = WsServer.init(allocator, wsSendFn),
-            .ws_streams = std.AutoHashMap(u64, std.net.Stream).init(allocator),
+            .ws_streams = std.AutoHashMap(u64, c.fd_t).init(allocator),
             .shutdown = false,
             .next_conn_id = 1,
         };
     }
 
     pub fn deinit(self: *DevServer) void {
-        self.listener.deinit();
+        _ = c.close(self.listener_fd);
         {
             var it = self.handlers.iterator();
             while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
@@ -148,7 +191,7 @@ pub const DevServer = struct {
     }
 
     pub fn port(self: *const DevServer) u16 {
-        return self.listener.listen_address.getPort();
+        return self.port_;
     }
 
     fn register(self: *DevServer, method: []const u8, path: []const u8, handler: Handler) !void {
@@ -170,38 +213,26 @@ pub const DevServer = struct {
         if (old) |kv| self.allocator.free(kv.key);
     }
 
-    pub fn GET(self: *DevServer, path: []const u8, handler: Handler) !void {
-        try self.register("GET", path, handler);
-    }
-    pub fn POST(self: *DevServer, path: []const u8, handler: Handler) !void {
-        try self.register("POST", path, handler);
-    }
-    pub fn PUT(self: *DevServer, path: []const u8, handler: Handler) !void {
-        try self.register("PUT", path, handler);
-    }
-    pub fn PATCH(self: *DevServer, path: []const u8, handler: Handler) !void {
-        try self.register("PATCH", path, handler);
-    }
-    pub fn DELETE(self: *DevServer, path: []const u8, handler: Handler) !void {
-        try self.register("DELETE", path, handler);
-    }
-    pub fn ws(self: *DevServer, path: []const u8, handler: WsHandler) !void {
-        try self.ws_server.register(path, handler);
-    }
+    pub fn GET(self: *DevServer, path: []const u8, handler: Handler) !void { try self.register("GET", path, handler); }
+    pub fn POST(self: *DevServer, path: []const u8, handler: Handler) !void { try self.register("POST", path, handler); }
+    pub fn PUT(self: *DevServer, path: []const u8, handler: Handler) !void { try self.register("PUT", path, handler); }
+    pub fn PATCH(self: *DevServer, path: []const u8, handler: Handler) !void { try self.register("PATCH", path, handler); }
+    pub fn DELETE(self: *DevServer, path: []const u8, handler: Handler) !void { try self.register("DELETE", path, handler); }
+    pub fn ws(self: *DevServer, path: []const u8, handler: WsHandler) !void { try self.ws_server.register(path, handler); }
 
     pub fn run(self: *DevServer) !void {
-        std.debug.print("DevServer listening on http://127.0.0.1:{d}\n", .{self.port()});
-
+        std.debug.print("DevServer listening on http://127.0.0.1:{d}\n", .{self.port_});
         self.ws_server.ctx = @ptrCast(self);
 
         while (!@atomicLoad(bool, &self.shutdown, .acquire)) {
-            const conn = self.listener.accept() catch |err| {
-                logErr("accept error: {s}", .{@errorName(err)});
+            const fd = c.accept(self.listener_fd, null, null);
+            if (fd < 0) {
+                logErr("accept error", .{});
                 continue;
-            };
-            const conn_alloc = self.allocator;
+            }
             const server_ptr = self;
-            _ = try std.Thread.spawn(.{}, handleConn, .{ server_ptr, conn, conn_alloc });
+            const conn_alloc = self.allocator;
+            _ = try std.Thread.spawn(.{}, handleConn, .{ server_ptr, fd, conn_alloc });
         }
     }
 
@@ -211,33 +242,44 @@ pub const DevServer = struct {
         return id;
     }
 
-    fn handleConn(self: *DevServer, conn: std.net.Server.Connection, alloc: Allocator) void {
-        defer conn.stream.close();
+    fn readHttpRequest(fd: c.fd_t, buf: []u8) ![]const u8 {
+        var total: usize = 0;
+        while (total < buf.len) {
+            const n = c.read(fd, buf.ptr + total, buf.len - total);
+            if (n < 0) return error.ReadFailed;
+            if (n == 0) break;
+            total += @intCast(n);
+            if (total > 0 and std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") != null) break;
+            if (total > 0 and std.mem.indexOf(u8, buf[0..total], "\n\n") != null) break;
+        }
+        return buf[0..total];
+    }
+
+    fn handleConn(self: *DevServer, fd: c.fd_t, alloc: Allocator) void {
+        defer _ = c.close(fd);
 
         var buf: [65536]u8 = undefined;
-        const n = conn.stream.read(buf[0..]) catch |err| {
+        const data = readHttpRequest(fd, buf[0..]) catch |err| {
             logErr("read error: {s}", .{@errorName(err)});
             return;
         };
-        if (n == 0) return;
+        if (data.len == 0) return;
 
-        const req_data: []const u8 = buf[0..n];
-
-        if (upgrade.isUpgradeRequest(req_data)) {
-            self.handleWs(conn, req_data) catch |err| {
+        if (upgrade.isUpgradeRequest(data)) {
+            self.handleWs(fd, data) catch |err| {
                 logErr("ws upgrade failed: {s}", .{@errorName(err)});
             };
             return;
         }
 
-        self.handleHttp(conn, req_data, alloc) catch |err| {
+        self.handleHttp(fd, data, alloc) catch |err| {
             logErr("http handler failed: {s}", .{@errorName(err)});
         };
     }
 
-    fn handleHttp(self: *DevServer, conn: std.net.Server.Connection, req_data: []const u8, alloc: Allocator) !void {
+    fn handleHttp(self: *DevServer, fd: c.fd_t, req_data: []const u8, alloc: Allocator) !void {
         const path = helpers.getPathFromRequest(req_data) orelse {
-            try writeResponse(conn, 400, "text/plain", "Bad Request", &.{});
+            try writeResponse(fd, 400, "text/plain", "Bad Request", &.{});
             return;
         };
         const method = helpers.getMethodFromRequest(req_data) orelse "GET";
@@ -268,7 +310,7 @@ pub const DevServer = struct {
         if (self.middlewares.has_global) {
             for (self.middlewares.global.items) |mw| {
                 const stop = mw(alloc, &ctx) catch |err| {
-                    try writeError(conn, 500, @errorName(err));
+                    try writeError(fd, 500, @errorName(err));
                     return;
                 };
                 if (stop or ctx.body != null) { handled = true; break; }
@@ -278,7 +320,7 @@ pub const DevServer = struct {
             if (self.middlewares.precise.get(path)) |list| {
                 for (list.items) |mw| {
                     const stop = mw(alloc, &ctx) catch |err| {
-                        try writeError(conn, 500, @errorName(err));
+                        try writeError(fd, 500, @errorName(err));
                         return;
                     };
                     if (stop or ctx.body != null) { handled = true; break; }
@@ -290,7 +332,7 @@ pub const DevServer = struct {
                 if (entry.rule.match(path)) {
                     for (entry.list.items) |mw| {
                         const stop = mw(alloc, &ctx) catch |err| {
-                            try writeError(conn, 500, @errorName(err));
+                            try writeError(fd, 500, @errorName(err));
                             return;
                         };
                         if (stop or ctx.body != null) { handled = true; break; }
@@ -305,7 +347,7 @@ pub const DevServer = struct {
             if (key) |k| {
                 if (self.handlers.get(k)) |handler| {
                     handler(alloc, &ctx) catch |err| {
-                        try writeError(conn, 500, @errorName(err));
+                        try writeError(fd, 500, @errorName(err));
                         return;
                     };
                 } else {
@@ -313,16 +355,16 @@ pub const DevServer = struct {
                     if (findParamRoute(self.param_routes.items, method, path, &params_buf)) |result| {
                         ctx.params = params_buf[0..result.param_count];
                         result.handler(alloc, &ctx) catch |err| {
-                            try writeError(conn, 500, @errorName(err));
+                            try writeError(fd, 500, @errorName(err));
                             return;
                         };
                     } else {
-                        try writeError(conn, 404, "Not Found");
+                        try writeError(fd, 404, "Not Found");
                         return;
                     }
                 }
             } else {
-                try writeError(conn, 404, "Not Found");
+                try writeError(fd, 404, "Not Found");
                 return;
             }
         }
@@ -334,26 +376,26 @@ pub const DevServer = struct {
         };
         const extra_headers = if (ctx.headers) |h| h.items else "";
         const body = ctx.body orelse "";
-        try writeResponse(conn, ctx.status, content_type, body, extra_headers);
+        try writeResponse(fd, ctx.status, content_type, body, extra_headers);
     }
 
-    fn handleWs(self: *DevServer, conn: std.net.Server.Connection, req_data: []const u8) !void {
+    fn handleWs(self: *DevServer, fd: c.fd_t, req_data: []const u8) !void {
         const path = helpers.getPathFromRequest(req_data) orelse {
-            try writeResponse(conn, 400, "text/plain", "Bad Request", &.{});
+            try writeResponse(fd, 400, "text/plain", "Bad Request", &.{});
             return;
         };
         const handler = self.ws_server.getHandler(path) orelse {
-            try writeResponse(conn, 404, "text/plain", "WebSocket handler not found for this path", &.{});
+            try writeResponse(fd, 404, "text/plain", "WebSocket handler not found for this path", &.{});
             return;
         };
 
         const key = upgrade.extractWsKey(req_data) orelse {
-            try writeResponse(conn, 400, "text/plain", "Missing Sec-WebSocket-Key", &.{});
+            try writeResponse(fd, 400, "text/plain", "Missing Sec-WebSocket-Key", &.{});
             return;
         };
         var accept_buf: [29]u8 = undefined;
         upgrade.computeAcceptKey(key, &accept_buf) catch {
-            try writeResponse(conn, 400, "text/plain", "Invalid Sec-WebSocket-Key", &.{});
+            try writeResponse(fd, 400, "text/plain", "Invalid Sec-WebSocket-Key", &.{});
             return;
         };
 
@@ -362,11 +404,11 @@ pub const DevServer = struct {
             "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n",
             .{accept_buf[0..28]},
         );
-        _ = try conn.stream.write(hs);
+        _ = try writeAll(fd, hs);
 
         const conn_id = self.nextId();
         try self.ws_server.addActive(conn_id, handler);
-        try self.ws_streams.put(conn_id, conn.stream);
+        try self.ws_streams.put(conn_id, fd);
         defer {
             self.ws_server.removeActive(conn_id);
             _ = self.ws_streams.remove(conn_id);
@@ -374,11 +416,9 @@ pub const DevServer = struct {
 
         var read_buf: [65536]u8 = undefined;
         while (true) {
-            const n = conn.stream.read(read_buf[0..]) catch |err| {
-                logErr("ws read error: {s}", .{@errorName(err)});
-                break;
-            };
-            if (n == 0) break;
+            const nr = c.read(fd, &read_buf, read_buf.len);
+            if (nr <= 0) break;
+            const n: usize = @intCast(nr);
 
             const parsed = frame.parseFrame(read_buf[0..n]) catch |err| {
                 logErr("ws frame parse error: {s}", .{@errorName(err)});
@@ -389,12 +429,10 @@ pub const DevServer = struct {
                 handler(conn_id, &parsed, @ptrCast(self));
             } else if (parsed.opcode == .ping) {
                 const pong = try frame.writeFrame(&read_buf, .{ .opcode = .pong, .fin = true, .payload = parsed.payload });
-                _ = conn.stream.write(read_buf[0..pong]) catch break;
+                _ = writeAll(fd, read_buf[0..pong]) catch break;
             } else if (parsed.opcode == .close) {
-                const close_resp = frame.writeFrame(&read_buf, .{ .opcode = .close, .fin = true, .payload = parsed.payload }) catch {
-                    break;
-                };
-                _ = conn.stream.write(read_buf[0..close_resp]) catch {};
+                const close_resp = frame.writeFrame(&read_buf, .{ .opcode = .close, .fin = true, .payload = parsed.payload }) catch break;
+                _ = writeAll(fd, read_buf[0..close_resp]) catch {};
                 break;
             }
         }
@@ -414,34 +452,48 @@ pub const DevServer = struct {
 
     fn wsSendFn(ctx: *anyopaque, conn_id: u64, opcode: Opcode, payload: []const u8) !void {
         const s: *DevServer = @ptrCast(@alignCast(ctx));
-        const stream = s.ws_streams.get(conn_id) orelse return error.ConnectionNotFound;
+        const fd = s.ws_streams.get(conn_id) orelse return error.ConnectionNotFound;
         var buf: [65536]u8 = undefined;
         const total = try frame.writeFrame(&buf, .{ .opcode = opcode, .fin = true, .payload = payload });
-        _ = try stream.write(buf[0..total]);
+        _ = try writeAll(fd, buf[0..total]);
     }
 };
 
-fn writeResponse(conn: std.net.Server.Connection, status: u16, content_type: []const u8, body: []const u8, extra_headers: []const u8) !void {
-    var buf: [4096]u8 = undefined;
-    const reason = switch (status) {
-        200 => "OK",
-        201 => "Created",
-        204 => "No Content",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
+fn posixSocket(domain: c_uint, sock_type: c_uint, protocol: c_uint) !c.fd_t {
+    const fd = c.socket(domain, sock_type, protocol);
+    if (fd < 0) return error.SocketFailed;
+    return fd;
+}
+
+fn writeAll(fd: c.fd_t, data: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const n = c.write(fd, data.ptr + offset, data.len - offset);
+        if (n < 0) return error.WriteFailed;
+        offset += @intCast(n);
+    }
+}
+
+fn statusReason(status: u16) []const u8 {
+    return switch (status) {
+        200 => "OK", 201 => "Created", 204 => "No Content",
+        400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
+        404 => "Not Found", 405 => "Method Not Allowed",
         500 => "Internal Server Error",
         else => "Unknown",
     };
-    const pos = if (body.len > 0)
+}
+
+fn writeResponse(fd: c.fd_t, status: u16, content_type: []const u8, body: []const u8, extra_headers: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    const reason = statusReason(status);
+    const msg = if (body.len > 0)
         try std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\n{s}Content-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status, reason, content_type, extra_headers, body.len, body })
     else
         try std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\n{s}Content-Length: 0\r\nConnection: close\r\n\r\n", .{ status, reason, content_type, extra_headers });
-    _ = try conn.stream.write(buf[0..pos.len]);
+    _ = try writeAll(fd, buf[0..msg.len]);
 }
 
-fn writeError(conn: std.net.Server.Connection, status: u16, msg: []const u8) !void {
-    try writeResponse(conn, status, "text/plain", msg, &.{});
+fn writeError(fd: c.fd_t, status: u16, msg: []const u8) !void {
+    try writeResponse(fd, status, "text/plain", msg, &.{});
 }
