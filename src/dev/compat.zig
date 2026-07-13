@@ -40,11 +40,10 @@ pub const CompatServer = struct {
         init_cfg: InitConfig,
     ) !CompatServer {
         _ = io;
-        _ = app_ctx;
         _ = fiber_stack_size_kb;
         _ = tls_auth;
         _ = init_cfg;
-        const inner = try DevServer.init(allocator, bind_addr);
+        const inner = try DevServer.init(allocator, bind_addr, app_ctx);
         return .{ .inner = inner };
     }
 

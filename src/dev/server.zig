@@ -115,6 +115,7 @@ pub const DevServer = struct {
     allocator: Allocator,
     listener_fd: c.fd_t,
     port_: u16,
+    app_ctx: ?*anyopaque,
     handlers: std.StringHashMap(Handler),
     param_routes: std.ArrayList(ParamRoute),
     middlewares: MiddlewareStore,
@@ -123,7 +124,7 @@ pub const DevServer = struct {
     shutdown: bool,
     next_conn_id: u64,
 
-    pub fn init(allocator: Allocator, bind_addr: []const u8) !DevServer {
+    pub fn init(allocator: Allocator, bind_addr: []const u8, app_ctx: ?*anyopaque) !DevServer {
         const colon = std.mem.indexOfScalar(u8, bind_addr, ':') orelse return error.InvalidListenAddress;
         const ip_str = bind_addr[0..colon];
         const port_str = bind_addr[colon + 1 ..];
@@ -158,6 +159,7 @@ pub const DevServer = struct {
             .allocator = allocator,
             .listener_fd = fd,
             .port_ = local_port,
+            .app_ctx = app_ctx,
             .handlers = std.StringHashMap(Handler).init(allocator),
             .param_routes = std.ArrayList(ParamRoute).empty,
             .middlewares = .{
@@ -295,7 +297,7 @@ pub const DevServer = struct {
             .request_data = req_data,
             .request_body = req_data[body_start..],
             .path = path,
-            .app_ctx = null,
+            .app_ctx = self.app_ctx,
             .allocator = alloc,
             .status = 200,
             .content_type = .plain,
