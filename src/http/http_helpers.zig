@@ -42,12 +42,17 @@ pub fn isKeepAliveConnection(buf: []const u8) bool {
     return http11;
 }
 
-fn requestLineIsHttp11(buf: []const u8) bool {
+/// Returns true when the request line declares HTTP/1.1.
+/// Tokenizes the third word so "HTTP/1.10" does not match (unlike endsWith).
+pub fn requestLineIsHttp11(buf: []const u8) bool {
     const end = std.mem.indexOf(u8, buf, "\r\n") orelse
         std.mem.indexOfScalar(u8, buf, '\n') orelse
-        buf.len;
-    const line = std.mem.trim(u8, buf[0..end], "\r");
-    return std.mem.endsWith(u8, line, "HTTP/1.1");
+        return false;
+    var parts = std.mem.tokenizeScalar(u8, std.mem.trim(u8, buf[0..end], "\r"), ' ');
+    _ = parts.next() orelse return false;
+    _ = parts.next() orelse return false;
+    const version = parts.next() orelse return false;
+    return std.mem.eql(u8, version, "HTTP/1.1");
 }
 
 fn headerValueHasToken(value: []const u8, token: []const u8) bool {

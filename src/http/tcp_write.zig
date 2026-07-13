@@ -36,6 +36,14 @@ pub fn submitWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
 
     const resp_buf = conn.response_buf orelse return;
 
+    // Defensive: onWriteComplete and closeConn both guard pool_idx, but
+    // submitWrite did not. Without a valid slot, writev_in_flight and
+    // write_iovs are inaccessible — close the connection rather than OOB.
+    if (conn.pool_idx == 0xFFFFFFFF) {
+        logErr("submitWrite: no pool slot for fd={d}, closing", .{conn.fd});
+        self.closeConn(conn_id, conn.fd);
+        return;
+    }
     const slot = &self.pool.slots[conn.pool_idx];
 
     if (slot.line4.writev_in_flight != 0) {
@@ -182,6 +190,14 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
     const fd = if (conn.fixed_index != 0xFFFF) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
 
     const resp_buf = conn.response_buf orelse return;
+
+    // Defensive: closeConn and general write paths guard pool_idx; TLS
+    // path was missed when TLS support was added in #58.
+    if (conn.pool_idx == 0xFFFFFFFF) {
+        logErr("submitTlsWrite: no pool slot for fd={d}, closing", .{conn.fd});
+        self.closeConn(conn_id, conn.fd);
+        return;
+    }
     const slot = &self.pool.slots[conn.pool_idx];
 
     if (slot.line4.writev_in_flight != 0) {

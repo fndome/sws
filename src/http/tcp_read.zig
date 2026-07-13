@@ -711,17 +711,6 @@ fn requestTargetIsValid(target: []const u8) bool {
     return true;
 }
 
-fn requestLineIsHttp11(buf: []const u8) bool {
-    const end = std.mem.indexOf(u8, buf, "\r\n") orelse
-        std.mem.indexOfScalar(u8, buf, '\n') orelse
-        return false;
-    var parts = std.mem.tokenizeScalar(u8, std.mem.trim(u8, buf[0..end], "\r"), ' ');
-    _ = parts.next() orelse return false;
-    _ = parts.next() orelse return false;
-    const version = parts.next() orelse return false;
-    return std.mem.eql(u8, version, "HTTP/1.1");
-}
-
 fn isRequestHeaderNameChar(ch: u8) bool {
     const token_symbols = "!#$%&'*+-.^_`|~";
     return (ch >= 'A' and ch <= 'Z') or
@@ -762,7 +751,7 @@ fn hostHeaderIsValidForRequest(buf: []const u8) bool {
         }
     }
     // 修改原因：HTTP/1.1 必须且只能有一个 Host；HTTP/1.0 不强制 Host，但重复 Host 仍会造成目标主机歧义。
-    if (requestLineIsHttp11(buf)) return host_count == 1;
+    if (helpers.requestLineIsHttp11(buf)) return host_count == 1;
     return host_count <= 1;
 }
 
