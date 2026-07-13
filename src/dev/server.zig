@@ -1,11 +1,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
-const c = std.c;
 
 comptime {
     if (builtin.os.tag == .linux) {
-        @compileError("DevServer is for non-Linux development only. Use sws.AsyncServer on Linux.");
+        @compileError("DevServer is for non-Linux dev only. Use sws.AsyncServer (io_uring) on Linux.");
+    }
+    if (builtin.os.tag == .windows) {
+        @compileError("DevServer needs native Winsock2 for Windows (TODO). Use WSL or macOS for local dev.");
     }
 }
 
@@ -23,18 +25,10 @@ const WsHandler = @import("../ws/server.zig").WsHandler;
 const WsServer = @import("../ws/server.zig").WsServer;
 const logErr = helpers.logErr;
 
-pub const Segment = union(enum) {
-    literal: []const u8,
-    param: []const u8,
-    wildcard: void,
-};
+const Socket = std.c.fd_t;
 
-pub const ParamRoute = struct {
-    method: []const u8,
-    segments: []const Segment,
-    handler: Handler,
-};
-
+pub const Segment = union(enum) { literal: []const u8, param: []const u8, wildcard: void };
+pub const ParamRoute = struct { method: []const u8, segments: []const Segment, handler: Handler };
 const MAX_PARAMS: usize = 16;
 
 fn parseParamPattern(allocator: Allocator, pattern: []const u8) ![]const Segment {
@@ -49,15 +43,9 @@ fn parseParamPattern(allocator: Allocator, pattern: []const u8) ![]const Segment
     var iter = std.mem.splitScalar(u8, pattern, '/');
     while (iter.next()) |part| {
         if (part.len == 0) continue;
-        if (std.mem.eql(u8, part, "*")) {
-            try segments.append(allocator, .wildcard);
-        } else if (part[0] == ':') {
-            const name = try allocator.dupe(u8, part[1..]);
-            try segments.append(allocator, .{ .param = name });
-        } else {
-            const lit = try allocator.dupe(u8, part);
-            try segments.append(allocator, .{ .literal = lit });
-        }
+        if (std.mem.eql(u8, part, "*")) { try segments.append(allocator, .wildcard); }
+        else if (part[0] == ':') { try segments.append(allocator, .{ .param = try allocator.dupe(u8, part[1..]) }); }
+        else { try segments.append(allocator, .{ .literal = try allocator.dupe(u8, part) }); }
     }
     return segments.toOwnedSlice(allocator);
 }
@@ -74,20 +62,15 @@ fn matchParamRoute(route: ParamRoute, path: []const u8, params: *[MAX_PARAMS]Rou
     var path_iter = std.mem.splitScalar(u8, path, '/');
     var param_idx: usize = 0;
     var seg_idx: usize = 0;
-
     while (path_iter.next()) |part| {
         if (part.len == 0) continue;
         if (seg_idx >= route.segments.len) return null;
-        const segment = route.segments[seg_idx];
-        switch (segment) {
-            .literal => |lit| {
-                if (!std.mem.eql(u8, lit, part)) return null;
-            },
+        switch (route.segments[seg_idx]) {
+            .literal => |lit| { if (!std.mem.eql(u8, lit, part)) return null; },
             .param => |name| {
-                if (param_idx < params.len) {
-                    params[param_idx] = .{ .name = name, .value = part };
-                    param_idx += 1;
-                } else return null;
+                if (param_idx >= params.len) return null;
+                params[param_idx] = .{ .name = name, .value = part };
+                param_idx += 1;
             },
             .wildcard => return param_idx,
         }
@@ -96,69 +79,53 @@ fn matchParamRoute(route: ParamRoute, path: []const u8, params: *[MAX_PARAMS]Rou
     return if (seg_idx == route.segments.len) param_idx else null;
 }
 
-fn parseIp4Parts(ip_str: []const u8) ![4]u8 {
+fn ip4Parse(ip_str: []const u8) ![4]u8 {
     var parts: [4]u8 = undefined;
     var it = std.mem.splitScalar(u8, ip_str, '.');
-    for (0..4) |i| {
-        const p = it.next() orelse return error.InvalidIp;
-        parts[i] = std.fmt.parseInt(u8, p, 10) catch return error.InvalidIp;
-    }
+    for (0..4) |i| parts[i] = std.fmt.parseInt(u8, it.next() orelse return error.InvalidIp, 10) catch return error.InvalidIp;
     if (it.next() != null) return error.InvalidIp;
     return parts;
 }
 
-fn ip4PartsToU32(parts: [4]u8) u32 {
-    return (@as(u32, parts[0]) << 24) | (@as(u32, parts[1]) << 16) | (@as(u32, parts[2]) << 8) | @as(u32, parts[3]);
-}
-
 pub const DevServer = struct {
     allocator: Allocator,
-    listener_fd: c.fd_t,
-    port_: u16,
+    sock: Socket,
+    listen_port: u16,
     app_ctx: ?*anyopaque,
     handlers: std.StringHashMap(Handler),
     param_routes: std.ArrayList(ParamRoute),
     middlewares: MiddlewareStore,
     ws_server: WsServer,
-    ws_streams: std.AutoHashMap(u64, c.fd_t),
+    ws_streams: std.AutoHashMap(u64, Socket),
     shutdown: bool,
     next_conn_id: u64,
 
     pub fn init(allocator: Allocator, bind_addr: []const u8, app_ctx: ?*anyopaque) !DevServer {
         const colon = std.mem.indexOfScalar(u8, bind_addr, ':') orelse return error.InvalidListenAddress;
-        const ip_str = bind_addr[0..colon];
-        const port_str = bind_addr[colon + 1 ..];
-        const local_port = try std.fmt.parseInt(u16, port_str, 10);
+        const ip = try ip4Parse(bind_addr[0..colon]);
+        const addr_port = try std.fmt.parseInt(u16, bind_addr[colon + 1 ..], 10);
 
-        const ip_parts = try parseIp4Parts(ip_str);
-        const fd = try posixSocket(c.AF.INET, c.SOCK.STREAM, 0);
-        errdefer _ = c.close(fd);
+        const raw = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM | std.c.SOCK.CLOEXEC, 0);
+        if (raw < 0) return error.SocketFailed;
+        const fd: Socket = @intCast(raw);
+        errdefer _ = std.c.close(fd);
 
         const one: c_int = 1;
-        _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.REUSEADDR, &one, @sizeOf(c_int));
+        _ = std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.REUSEADDR, &one, @sizeOf(c_int));
 
-        var addr: extern struct {
-            family: c.sa_family_t,
-            port: u16,
-            addr: u32,
-            zero: [8]u8,
-        } = .{
-            .family = c.AF.INET,
-            .port = std.mem.nativeToBig(u16, local_port),
-            .addr = ip4PartsToU32(ip_parts),
+        var saddr: extern struct { family: u16, port: u16, addr: u32, zero: [8]u8 } = .{
+            .family = std.c.AF.INET,
+            .port = std.mem.nativeToBig(u16, addr_port),
+            .addr = (@as(u32, ip[0]) << 24) | (@as(u32, ip[1]) << 16) | (@as(u32, ip[2]) << 8) | @as(u32, ip[3]),
             .zero = [_]u8{0} ** 8,
         };
-        if (c.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) != 0) {
-            return error.BindFailed;
-        }
-        if (c.listen(fd, 128) != 0) {
-            return error.ListenFailed;
-        }
+        if (std.c.bind(fd, @ptrCast(&saddr), @sizeOf(@TypeOf(saddr))) != 0) return error.BindFailed;
+        if (std.c.listen(fd, 128) != 0) return error.ListenFailed;
 
         return DevServer{
             .allocator = allocator,
-            .listener_fd = fd,
-            .port_ = local_port,
+            .sock = fd,
+            .listen_port = addr_port,
             .app_ctx = app_ctx,
             .handlers = std.StringHashMap(Handler).init(allocator),
             .param_routes = std.ArrayList(ParamRoute).empty,
@@ -169,333 +136,197 @@ pub const DevServer = struct {
                 .wildcard = std.ArrayList(WildcardEntry).empty,
             },
             .ws_server = WsServer.init(allocator, wsSendFn),
-            .ws_streams = std.AutoHashMap(u64, c.fd_t).init(allocator),
+            .ws_streams = std.AutoHashMap(u64, Socket).init(allocator),
             .shutdown = false,
             .next_conn_id = 1,
         };
     }
 
     pub fn deinit(self: *DevServer) void {
-        _ = c.close(self.listener_fd);
-        {
-            var it = self.handlers.iterator();
-            while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
-        }
+        _ = std.c.close(self.sock);
+        var it = self.handlers.iterator();
+        while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
         self.handlers.deinit();
-        for (self.param_routes.items) |*pr| {
-            freeSegments(self.allocator, pr.segments);
-            self.allocator.free(pr.method);
-        }
+        for (self.param_routes.items) |*pr| { freeSegments(self.allocator, pr.segments); self.allocator.free(pr.method); }
         self.param_routes.deinit(self.allocator);
         self.middlewares.deinit(self.allocator);
         self.ws_server.deinit();
         self.ws_streams.deinit();
     }
 
-    pub fn port(self: *const DevServer) u16 {
-        return self.port_;
-    }
+    pub fn port(self: *const DevServer) u16 { return self.listen_port; }
 
     fn register(self: *DevServer, method: []const u8, path: []const u8, handler: Handler) !void {
         if (std.mem.indexOfScalar(u8, path, ':') != null or std.mem.indexOfScalar(u8, path, '*') != null) {
-            const method_dup = try self.allocator.dupe(u8, method);
-            errdefer self.allocator.free(method_dup);
-            const segments = try parseParamPattern(self.allocator, path);
-            errdefer freeSegments(self.allocator, segments);
-            try self.param_routes.append(self.allocator, .{
-                .method = method_dup,
-                .segments = segments,
-                .handler = handler,
-            });
+            const m = try self.allocator.dupe(u8, method); errdefer self.allocator.free(m);
+            const segs = try parseParamPattern(self.allocator, path); errdefer freeSegments(self.allocator, segs);
+            try self.param_routes.append(self.allocator, .{ .method = m, .segments = segs, .handler = handler });
             return;
         }
         const key = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ method, path });
         errdefer self.allocator.free(key);
-        const old = try self.handlers.fetchPut(key, handler);
-        if (old) |kv| self.allocator.free(kv.key);
+        if (try self.handlers.fetchPut(key, handler)) |old| self.allocator.free(old.key);
     }
 
-    pub fn GET(self: *DevServer, path: []const u8, handler: Handler) !void { try self.register("GET", path, handler); }
-    pub fn POST(self: *DevServer, path: []const u8, handler: Handler) !void { try self.register("POST", path, handler); }
-    pub fn PUT(self: *DevServer, path: []const u8, handler: Handler) !void { try self.register("PUT", path, handler); }
-    pub fn PATCH(self: *DevServer, path: []const u8, handler: Handler) !void { try self.register("PATCH", path, handler); }
-    pub fn DELETE(self: *DevServer, path: []const u8, handler: Handler) !void { try self.register("DELETE", path, handler); }
-    pub fn ws(self: *DevServer, path: []const u8, handler: WsHandler) !void { try self.ws_server.register(path, handler); }
+    pub fn GET(self: *DevServer, p: []const u8, h: Handler) !void { try self.register("GET", p, h); }
+    pub fn POST(self: *DevServer, p: []const u8, h: Handler) !void { try self.register("POST", p, h); }
+    pub fn PUT(self: *DevServer, p: []const u8, h: Handler) !void { try self.register("PUT", p, h); }
+    pub fn PATCH(self: *DevServer, p: []const u8, h: Handler) !void { try self.register("PATCH", p, h); }
+    pub fn DELETE(self: *DevServer, p: []const u8, h: Handler) !void { try self.register("DELETE", p, h); }
+    pub fn ws(self: *DevServer, p: []const u8, h: WsHandler) !void { try self.ws_server.register(p, h); }
 
     pub fn run(self: *DevServer) !void {
-        std.debug.print("DevServer listening on http://127.0.0.1:{d}\n", .{self.port_});
+        std.debug.print("DevServer listening on http://127.0.0.1:{d}\n", .{self.listen_port});
         self.ws_server.ctx = @ptrCast(self);
 
         while (!@atomicLoad(bool, &self.shutdown, .acquire)) {
-            const fd = c.accept(self.listener_fd, null, null);
-            if (fd < 0) {
-                logErr("accept error", .{});
-                continue;
-            }
-            const server_ptr = self;
-            const conn_alloc = self.allocator;
-            _ = try std.Thread.spawn(.{}, handleConn, .{ server_ptr, fd, conn_alloc });
+            const raw = std.c.accept(self.sock, null, null);
+            if (raw < 0) { logErr("accept error", .{}); continue; }
+            const fd: Socket = @intCast(raw);
+            _ = try std.Thread.spawn(.{}, handleConn, .{ self, fd, self.allocator });
         }
     }
 
-    fn nextId(self: *DevServer) u64 {
-        const id = self.next_conn_id;
-        self.next_conn_id +%= 1;
-        return id;
-    }
-
-    fn readHttpRequest(fd: c.fd_t, buf: []u8) ![]const u8 {
+    fn readReq(fd: Socket, buf: []u8) ![]const u8 {
         var total: usize = 0;
         while (total < buf.len) {
-            const n = c.read(fd, buf.ptr + total, buf.len - total);
+            const n = std.c.read(fd, @ptrCast(buf.ptr + total), buf.len - total);
             if (n < 0) return error.ReadFailed;
             if (n == 0) break;
             total += @intCast(n);
-            if (total > 0 and std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") != null) break;
-            if (total > 0 and std.mem.indexOf(u8, buf[0..total], "\n\n") != null) break;
+            if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") != null) break;
+            if (std.mem.indexOf(u8, buf[0..total], "\n\n") != null) break;
         }
         return buf[0..total];
     }
 
-    fn handleConn(self: *DevServer, fd: c.fd_t, alloc: Allocator) void {
-        defer _ = c.close(fd);
-
+    fn handleConn(self: *DevServer, fd: Socket, alloc: Allocator) void {
+        defer _ = std.c.close(fd);
         var buf: [65536]u8 = undefined;
-        const data = readHttpRequest(fd, buf[0..]) catch |err| {
-            logErr("read error: {s}", .{@errorName(err)});
-            return;
-        };
+        const data = readReq(fd, buf[0..]) catch |e| { logErr("read: {s}", .{@errorName(e)}); return; };
         if (data.len == 0) return;
 
         if (upgrade.isUpgradeRequest(data)) {
-            self.handleWs(fd, data) catch |err| {
-                logErr("ws upgrade failed: {s}", .{@errorName(err)});
-            };
+            self.handleWs(fd, data) catch |e| { logErr("ws: {s}", .{@errorName(e)}); };
             return;
         }
-
-        self.handleHttp(fd, data, alloc) catch |err| {
-            logErr("http handler failed: {s}", .{@errorName(err)});
-        };
+        self.handleHttp(fd, data, alloc) catch |e| { logErr("http: {s}", .{@errorName(e)}); };
     }
 
-    fn handleHttp(self: *DevServer, fd: c.fd_t, req_data: []const u8, alloc: Allocator) !void {
-        const path = helpers.getPathFromRequest(req_data) orelse {
-            try writeResponse(fd, 400, "text/plain", "Bad Request", &.{});
-            return;
-        };
+    fn handleHttp(self: *DevServer, fd: Socket, req_data: []const u8, alloc: Allocator) !void {
+        const path = helpers.getPathFromRequest(req_data) orelse { try writeError(fd, 400, "Bad Request"); return; };
         const method = helpers.getMethodFromRequest(req_data) orelse "GET";
         const body_start = blk: {
-            const sep = std.mem.indexOf(u8, req_data, "\r\n\r\n");
-            if (sep) |s| break :blk s + 4;
-            const lf_sep = std.mem.indexOf(u8, req_data, "\n\n");
-            if (lf_sep) |s| break :blk s + 2;
+            if (std.mem.indexOf(u8, req_data, "\r\n\r\n")) |s| break :blk s + 4;
+            if (std.mem.indexOf(u8, req_data, "\n\n")) |s| break :blk s + 2;
             break :blk req_data.len;
         };
-
         var ctx = Context{
-            .request_data = req_data,
-            .request_body = req_data[body_start..],
-            .path = path,
-            .app_ctx = self.app_ctx,
-            .allocator = alloc,
-            .status = 200,
-            .content_type = .plain,
-            .body = null,
-            .headers = null,
-            .conn_id = 0,
-            .params = &.{},
+            .request_data = req_data, .request_body = req_data[body_start..], .path = path,
+            .app_ctx = self.app_ctx, .allocator = alloc,
+            .status = 200, .content_type = .plain, .body = null, .headers = null, .conn_id = 0, .params = &.{},
         };
         defer ctx.deinit();
 
         var handled = false;
-        if (self.middlewares.has_global) {
-            for (self.middlewares.global.items) |mw| {
-                const stop = mw(alloc, &ctx) catch |err| {
-                    try writeError(fd, 500, @errorName(err));
-                    return;
-                };
-                if (stop or ctx.body != null) { handled = true; break; }
+        if (self.middlewares.has_global) for (self.middlewares.global.items) |mw| {
+            if (mw(alloc, &ctx) catch |e| brk: { try writeError(fd, 500, @errorName(e)); break :brk true; } or ctx.body != null) { handled = true; break; }
+        };
+        if (!handled) if (self.middlewares.precise.get(path)) |list| for (list.items) |mw| {
+            if (mw(alloc, &ctx) catch |e| brk: { try writeError(fd, 500, @errorName(e)); break :brk true; } or ctx.body != null) { handled = true; break; }
+        };
+        if (!handled) for (self.middlewares.wildcard.items) |entry| {
+            if (!entry.rule.match(path)) continue;
+            for (entry.list.items) |mw| {
+                if (mw(alloc, &ctx) catch |e| brk: { try writeError(fd, 500, @errorName(e)); break :brk true; } or ctx.body != null) { handled = true; break; }
             }
-        }
+            if (handled) break;
+        };
         if (!handled) {
-            if (self.middlewares.precise.get(path)) |list| {
-                for (list.items) |mw| {
-                    const stop = mw(alloc, &ctx) catch |err| {
-                        try writeError(fd, 500, @errorName(err));
-                        return;
-                    };
-                    if (stop or ctx.body != null) { handled = true; break; }
-                }
-            }
-        }
-        if (!handled) {
-            for (self.middlewares.wildcard.items) |entry| {
-                if (entry.rule.match(path)) {
-                    for (entry.list.items) |mw| {
-                        const stop = mw(alloc, &ctx) catch |err| {
-                            try writeError(fd, 500, @errorName(err));
-                            return;
-                        };
-                        if (stop or ctx.body != null) { handled = true; break; }
-                    }
-                    if (handled) break;
-                }
-            }
-        }
-        if (!handled) {
-            var key_buf: [512]u8 = undefined;
-            const key = std.fmt.bufPrint(&key_buf, "{s}:{s}", .{ method, path }) catch null;
-            if (key) |k| {
-                if (self.handlers.get(k)) |handler| {
-                    handler(alloc, &ctx) catch |err| {
-                        try writeError(fd, 500, @errorName(err));
-                        return;
-                    };
+            var kb: [512]u8 = undefined;
+            if (std.fmt.bufPrint(&kb, "{s}:{s}", .{ method, path })) |k| {
+                if (self.handlers.get(k)) |h| {
+                    h(alloc, &ctx) catch |e| { try writeError(fd, 500, @errorName(e)); return; };
                 } else {
-                    var params_buf: [MAX_PARAMS]RouteParam = undefined;
-                    if (findParamRoute(self.param_routes.items, method, path, &params_buf)) |result| {
-                        ctx.params = params_buf[0..result.param_count];
-                        result.handler(alloc, &ctx) catch |err| {
-                            try writeError(fd, 500, @errorName(err));
-                            return;
-                        };
-                    } else {
-                        try writeError(fd, 404, "Not Found");
-                        return;
-                    }
+                    var pb: [MAX_PARAMS]RouteParam = undefined;
+                    if (findParamRoute(self.param_routes.items, method, path, &pb)) |r| {
+                        ctx.params = pb[0..r.param_count];
+                        r.handler(alloc, &ctx) catch |e| { try writeError(fd, 500, @errorName(e)); return; };
+                    } else { try writeError(fd, 404, "Not Found"); return; }
                 }
-            } else {
-                try writeError(fd, 404, "Not Found");
-                return;
-            }
+            } else |_| { try writeError(fd, 404, "Not Found"); return; }
         }
 
-        const content_type = switch (ctx.content_type) {
-            .plain => "text/plain",
-            .json => "application/json",
-            .html => "text/html",
-        };
-        const extra_headers = if (ctx.headers) |h| h.items else "";
+        const ct = switch (ctx.content_type) { .plain => "text/plain", .json => "application/json", .html => "text/html" };
+        const eh = if (ctx.headers) |h| h.items else "";
         const body = ctx.body orelse "";
-        try writeResponse(fd, ctx.status, content_type, body, extra_headers);
+        try writeResponse(fd, ctx.status, ct, body, eh);
     }
 
-    fn handleWs(self: *DevServer, fd: c.fd_t, req_data: []const u8) !void {
-        const path = helpers.getPathFromRequest(req_data) orelse {
-            try writeResponse(fd, 400, "text/plain", "Bad Request", &.{});
-            return;
-        };
-        const handler = self.ws_server.getHandler(path) orelse {
-            try writeResponse(fd, 404, "text/plain", "WebSocket handler not found for this path", &.{});
-            return;
-        };
-
-        const key = upgrade.extractWsKey(req_data) orelse {
-            try writeResponse(fd, 400, "text/plain", "Missing Sec-WebSocket-Key", &.{});
-            return;
-        };
-        var accept_buf: [29]u8 = undefined;
-        upgrade.computeAcceptKey(key, &accept_buf) catch {
-            try writeResponse(fd, 400, "text/plain", "Invalid Sec-WebSocket-Key", &.{});
-            return;
-        };
-
-        var handshake: [256]u8 = undefined;
-        const hs = try std.fmt.bufPrint(&handshake,
-            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n",
-            .{accept_buf[0..28]},
-        );
+    fn handleWs(self: *DevServer, fd: Socket, req_data: []const u8) !void {
+        const path = helpers.getPathFromRequest(req_data) orelse { try writeError(fd, 400, "Bad Request"); return; };
+        const handler = self.ws_server.getHandler(path) orelse { try writeError(fd, 404, "WS not found"); return; };
+        const key = upgrade.extractWsKey(req_data) orelse { try writeError(fd, 400, "Missing key"); return; };
+        var ab: [29]u8 = undefined;
+        upgrade.computeAcceptKey(key, &ab) catch { try writeError(fd, 400, "Invalid key"); return; };
+        var hb: [256]u8 = undefined;
+        const hs = try std.fmt.bufPrint(&hb, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n", .{ab[0..28]});
         _ = try writeAll(fd, hs);
 
-        const conn_id = self.nextId();
-        try self.ws_server.addActive(conn_id, handler);
-        try self.ws_streams.put(conn_id, fd);
-        defer {
-            self.ws_server.removeActive(conn_id);
-            _ = self.ws_streams.remove(conn_id);
-        }
+        const cid = blk: { const id = self.next_conn_id; self.next_conn_id +%= 1; break :blk id; };
+        try self.ws_server.addActive(cid, handler);
+        try self.ws_streams.put(cid, fd);
+        defer { self.ws_server.removeActive(cid); _ = self.ws_streams.remove(cid); }
 
-        var read_buf: [65536]u8 = undefined;
+        var rb: [65536]u8 = undefined;
         while (true) {
-            const nr = c.read(fd, &read_buf, read_buf.len);
+            const nr = std.c.read(fd, &rb, rb.len);
             if (nr <= 0) break;
-            const n: usize = @intCast(nr);
-
-            const parsed = frame.parseFrame(read_buf[0..n]) catch |err| {
-                logErr("ws frame parse error: {s}", .{@errorName(err)});
-                break;
-            };
-
-            if (parsed.opcode == .text or parsed.opcode == .binary) {
-                handler(conn_id, &parsed, @ptrCast(self));
-            } else if (parsed.opcode == .ping) {
-                const pong = try frame.writeFrame(&read_buf, .{ .opcode = .pong, .fin = true, .payload = parsed.payload });
-                _ = writeAll(fd, read_buf[0..pong]) catch break;
-            } else if (parsed.opcode == .close) {
-                const close_resp = frame.writeFrame(&read_buf, .{ .opcode = .close, .fin = true, .payload = parsed.payload }) catch break;
-                _ = writeAll(fd, read_buf[0..close_resp]) catch {};
-                break;
+            const parsed = frame.parseFrame(rb[0..@intCast(nr)]) catch |e| { logErr("ws parse: {s}", .{@errorName(e)}); break; };
+            switch (parsed.opcode) {
+                .text, .binary => handler(cid, &parsed, @ptrCast(self)),
+                .ping => { const pong = try frame.writeFrame(&rb, .{ .opcode = .pong, .fin = true, .payload = parsed.payload }); _ = writeAll(fd, rb[0..pong]) catch break; },
+                .close => { const cr = frame.writeFrame(&rb, .{ .opcode = .close, .fin = true, .payload = parsed.payload }) catch break; _ = writeAll(fd, rb[0..cr]) catch {}; break; },
+                else => {},
             }
         }
     }
 
-    const ParamMatchResult = struct { handler: Handler, param_count: usize };
-
-    fn findParamRoute(routes: []const ParamRoute, method: []const u8, path: []const u8, params: *[MAX_PARAMS]RouteParam) ?ParamMatchResult {
-        for (routes) |route| {
-            if (!std.mem.eql(u8, route.method, method)) continue;
-            if (matchParamRoute(route, path, params)) |param_count| {
-                return .{ .handler = route.handler, .param_count = param_count };
-            }
-        }
+    fn findParamRoute(routes: []const ParamRoute, method: []const u8, path: []const u8, params: *[MAX_PARAMS]RouteParam) ?struct { handler: Handler, param_count: usize } {
+        for (routes) |r| if (std.mem.eql(u8, r.method, method)) if (matchParamRoute(r, path, params)) |pc| return .{ .handler = r.handler, .param_count = pc };
         return null;
     }
 
     fn wsSendFn(ctx: *anyopaque, conn_id: u64, opcode: Opcode, payload: []const u8) !void {
         const s: *DevServer = @ptrCast(@alignCast(ctx));
         const fd = s.ws_streams.get(conn_id) orelse return error.ConnectionNotFound;
-        var buf: [65536]u8 = undefined;
-        const total = try frame.writeFrame(&buf, .{ .opcode = opcode, .fin = true, .payload = payload });
-        _ = try writeAll(fd, buf[0..total]);
+        var wb: [65536]u8 = undefined;
+        _ = try writeAll(fd, wb[0..try frame.writeFrame(&wb, .{ .opcode = opcode, .fin = true, .payload = payload })]);
     }
 };
 
-fn posixSocket(domain: c_uint, sock_type: c_uint, protocol: c_uint) !c.fd_t {
-    const fd = c.socket(domain, sock_type, protocol);
-    if (fd < 0) return error.SocketFailed;
-    return fd;
-}
-
-fn writeAll(fd: c.fd_t, data: []const u8) !void {
-    var offset: usize = 0;
-    while (offset < data.len) {
-        const n = c.write(fd, data.ptr + offset, data.len - offset);
+fn writeAll(fd: Socket, data: []const u8) !void {
+    var off: usize = 0;
+    while (off < data.len) {
+        const n = std.c.write(fd, @ptrCast(data.ptr + off), data.len - off);
         if (n < 0) return error.WriteFailed;
-        offset += @intCast(n);
+        off += @intCast(n);
     }
 }
 
-fn statusReason(status: u16) []const u8 {
-    return switch (status) {
+fn writeResponse(fd: Socket, status: u16, ct: []const u8, body: []const u8, eh: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    const reason = switch (status) {
         200 => "OK", 201 => "Created", 204 => "No Content",
         400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
-        404 => "Not Found", 405 => "Method Not Allowed",
-        500 => "Internal Server Error",
+        404 => "Not Found", 500 => "Internal Server Error",
         else => "Unknown",
     };
-}
-
-fn writeResponse(fd: c.fd_t, status: u16, content_type: []const u8, body: []const u8, extra_headers: []const u8) !void {
-    var buf: [4096]u8 = undefined;
-    const reason = statusReason(status);
     const msg = if (body.len > 0)
-        try std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\n{s}Content-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status, reason, content_type, extra_headers, body.len, body })
+        try std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\n{s}Content-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status, reason, ct, eh, body.len, body })
     else
-        try std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\n{s}Content-Length: 0\r\nConnection: close\r\n\r\n", .{ status, reason, content_type, extra_headers });
+        try std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\n{s}Content-Length: 0\r\nConnection: close\r\n\r\n", .{ status, reason, ct, eh });
     _ = try writeAll(fd, buf[0..msg.len]);
 }
 
-fn writeError(fd: c.fd_t, status: u16, msg: []const u8) !void {
-    try writeResponse(fd, status, "text/plain", msg, &.{});
-}
+fn writeError(fd: Socket, status: u16, msg: []const u8) !void { try writeResponse(fd, status, "text/plain", msg, &.{}); }

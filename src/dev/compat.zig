@@ -4,10 +4,10 @@ const builtin = @import("builtin");
 
 comptime {
     if (builtin.os.tag == .linux) {
-        @compileError("CompatServer wraps DevServer for macOS development. Use the real AsyncServer on Linux.");
+        @compileError("CompatServer is for non-Linux dev. Use the real AsyncServer (io_uring) on Linux.");
     }
     if (builtin.os.tag == .windows) {
-        @compileError("CompatServer on Windows requires Winsock2 bindings (TODO). Use WSL for development.");
+        @compileError("CompatServer needs Winsock2 on Windows (TODO). Use WSL or macOS for local dev.");
     }
 }
 
