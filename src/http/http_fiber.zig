@@ -3,6 +3,8 @@ const Allocator = std.mem.Allocator;
 
 const AsyncServer = @import("async_server.zig").AsyncServer;
 const Context = @import("context.zig").Context;
+const RouteParam = @import("context.zig").RouteParam;
+const http_routing = @import("http_routing.zig");
 const logErr = @import("http_helpers.zig").logErr;
 const sticker = @import("../stack_pool_sticker.zig");
 
@@ -109,7 +111,17 @@ pub fn httpTaskExec(caller_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, [
                     ctx.text(500, @errorName(err)) catch {};
                 };
             } else {
-                ctx.text(404, "Not Found") catch {};
+                // Exact match failed — try parameterized routes (/users/:id etc.)
+                var params_buf: [16]RouteParam = undefined;
+                if (http_routing.findParamHandler(server, method, path, &params_buf)) |result| {
+                    ctx.params = params_buf[0..result.param_count];
+                    result.handler(server.allocator, &ctx) catch |err| {
+                        logErr("handler error: {s}", .{@errorName(err)});
+                        ctx.text(500, @errorName(err)) catch {};
+                    };
+                } else {
+                    ctx.text(404, "Not Found") catch {};
+                }
             }
         } else {
             ctx.text(404, "Not Found") catch {};

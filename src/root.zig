@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 pub const AsyncServer = @import("example.zig").AsyncServer;
 pub const Connection = @import("example.zig").Connection;
 pub const Context = @import("example.zig").Context;
+pub const RouteParam = @import("http/context.zig").RouteParam;
 pub const Middleware = @import("example.zig").Middleware;
 pub const Handler = @import("example.zig").Handler;
 pub const PathRule = @import("antpath.zig").PathRule;

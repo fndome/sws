@@ -110,6 +110,10 @@ pub const AsyncServer = struct {
     respond_middlewares: MiddlewareStore,
     handlers: std.StringHashMap(Handler),
 
+    /// Parameterized routes (paths containing :id or * wildcard segments).
+    /// Populated by register() when the path is not a simple exact-match literal.
+    param_routes: std.ArrayList(http_routing.ParamRoute),
+
     /// Async logger: offloads stderr writes to a dedicated thread so IO thread
     /// never blocks on log syscalls.
     logger: ?*AsyncLogger = null,
@@ -343,6 +347,7 @@ pub const AsyncServer = struct {
             .middlewares = mw_store,
             .respond_middlewares = respond_mw_store,
             .handlers = std.StringHashMap(Handler).init(allocator),
+            .param_routes = std.ArrayList(http_routing.ParamRoute).empty,
             .cfg = cfg,
             .io_pinned = false,
             .next = null,
@@ -448,6 +453,13 @@ pub const AsyncServer = struct {
             }
         }
         self.handlers.deinit();
+        {
+            for (self.param_routes.items) |*pr| {
+                http_routing.freeSegments(self.allocator, pr.segments);
+                self.allocator.free(pr.method);
+            }
+            self.param_routes.deinit(self.allocator);
+        }
         self.http_ctx_pool.deinit(self.allocator);
         self.ws_ctx_pool.deinit(self.allocator);
         self.allocator.free(self.shared_fiber_stack);

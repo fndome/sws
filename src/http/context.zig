@@ -28,6 +28,11 @@ fn validateResponseHeader(key: []const u8, value: []const u8) !void {
     }
 }
 
+pub const RouteParam = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
 pub const Context = struct {
     pub const ContentType = enum { plain, json, html };
 
@@ -47,6 +52,9 @@ pub const Context = struct {
     conn_id: u64 = 0,
     deferred: bool = false,
     server: ?*anyopaque = null,
+    /// Path parameters extracted from a parameterized route (/users/:id).
+    /// Slice is borrowed from a stack-local buffer, never heap-allocated.
+    params: []const RouteParam = &.{},
 
     pub fn json(self: *Context, status: u16, value: anytype) !void {
         self.status = status;
@@ -130,6 +138,14 @@ pub const Context = struct {
             if (std.mem.eql(u8, key, name)) {
                 return pair[eq_pos + 1 ..];
             }
+        }
+        return null;
+    }
+
+    /// Returns the value of a captured path parameter (e.g. :id in /users/:id).
+    pub fn param(self: *const Context, name: []const u8) ?[]const u8 {
+        for (self.params) |p| {
+            if (std.mem.eql(u8, p.name, name)) return p.value;
         }
         return null;
     }
