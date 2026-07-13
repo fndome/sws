@@ -6,9 +6,6 @@ comptime {
     if (builtin.os.tag == .linux) {
         @compileError("CompatServer is for non-Linux dev. Use the real AsyncServer (io_uring) on Linux.");
     }
-    if (builtin.os.tag == .windows) {
-        @compileError("CompatServer needs Winsock2 on Windows (TODO). Use WSL or macOS for local dev.");
-    }
 }
 
 const Handler = @import("../http/types.zig").Handler;

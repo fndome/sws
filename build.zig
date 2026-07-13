@@ -112,6 +112,9 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "sws", .module = mod }},
             }),
         });
+        if (target.result.os.tag == .windows) {
+            dev_exe.root_module.linkSystemLibrary("ws2_32", .{});
+        }
         b.installArtifact(dev_exe);
 
         const run_dev = b.step("run", "Run the dev server");
