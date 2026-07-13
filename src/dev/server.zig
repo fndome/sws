@@ -1,5 +1,16 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const builtin = @import("builtin");
+
+// DevServer is for non-Linux development only. On Linux production,
+// build with sws.AsyncServer (io_uring). This comptime guard ensures
+// that accidentally importing DevServer on a Linux target produces
+// a clear compile-time error rather than a runtime surprise.
+comptime {
+    if (builtin.os.tag == .linux) {
+        @compileError("DevServer is for non-Linux development only. Use sws.AsyncServer on Linux.");
+    }
+}
 
 const Context = @import("../http/context.zig").Context;
 const RouteParam = @import("../http/context.zig").RouteParam;
