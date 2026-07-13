@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 pub const AsyncServer = @import("example.zig").AsyncServer;
+pub const DevServer = @import("dev/server.zig").DevServer;
 pub const Connection = @import("example.zig").Connection;
 pub const Context = @import("example.zig").Context;
 pub const RouteParam = @import("http/context.zig").RouteParam;
