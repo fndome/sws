@@ -56,6 +56,12 @@ pub const Context = struct {
     /// Slice is borrowed from a stack-local buffer, never heap-allocated.
     params: []const RouteParam = &.{},
 
+    /// Returns a chainable ResponseBuilder for building the response.
+    /// Usage: try ctx.response().status(201).json(data);
+    pub fn response(self: *Context) ResponseBuilder {
+        return ResponseBuilder.init(self);
+    }
+
     pub fn json(self: *Context, status: u16, value: anytype) !void {
         self.status = status;
         self.content_type = .json;
@@ -212,6 +218,41 @@ pub const Context = struct {
         if (self.body) |b| self.allocator.free(b);
         if (self.headers) |*h| h.deinit(self.allocator);
     }
+
+    /// Chainable API for building HTTP responses.
+    ///
+    /// Usage:
+    ///   try ctx.response().status(201).json(data);
+    ///   try ctx.response().header("X-Custom", "val").text("ok");
+    pub const ResponseBuilder = struct {
+        ctx: *Context,
+
+        pub fn init(ctx: *Context) ResponseBuilder {
+            return .{ .ctx = ctx };
+        }
+
+        pub fn status(self: *ResponseBuilder, code: u16) *ResponseBuilder {
+            self.ctx.status = code;
+            return self;
+        }
+
+        pub fn header(self: *ResponseBuilder, key: []const u8, value: []const u8) !*ResponseBuilder {
+            try self.ctx.setHeader(key, value);
+            return self;
+        }
+
+        pub fn json(self: *ResponseBuilder, value: anytype) !void {
+            try self.ctx.json(self.ctx.status, value);
+        }
+
+        pub fn text(self: *ResponseBuilder, data: []const u8) !void {
+            try self.ctx.text(self.ctx.status, data);
+        }
+
+        pub fn html(self: *ResponseBuilder, data: []const u8) !void {
+            try self.ctx.html(self.ctx.status, data);
+        }
+    };
 };
 
 test "Context.query parses URI from request line" {
@@ -293,4 +334,48 @@ test "Context.requestBody clamps oversized Content-Length without overflow" {
         .allocator = std.testing.allocator,
     };
     try std.testing.expectEqualStrings("abc", ctx.requestBody());
+}
+
+test "ResponseBuilder chains status and json" {
+    var ctx = Context{
+        .request_data = "GET / HTTP/1.1\r\n\r\n",
+        .path = "/",
+        .app_ctx = null,
+        .allocator = std.testing.allocator,
+    };
+    defer ctx.deinit();
+
+    try ctx.response().status(201).json(.{ .id = 42 });
+    try std.testing.expectEqual(@as(u16, 201), ctx.status);
+    try std.testing.expectEqual(Context.ContentType.json, ctx.content_type);
+    try std.testing.expect(ctx.body != null);
+}
+
+test "ResponseBuilder chains header and text" {
+    var ctx = Context{
+        .request_data = "GET / HTTP/1.1\r\n\r\n",
+        .path = "/",
+        .app_ctx = null,
+        .allocator = std.testing.allocator,
+    };
+    defer ctx.deinit();
+
+    var r = ctx.response();
+    r.status(200);
+    try r.header("X-Test", "ok");
+    try r.text("hello");
+    try std.testing.expectEqual(Context.ContentType.plain, ctx.content_type);
+    try std.testing.expect(ctx.headers != null);
+}
+
+test "ResponseBuilder header returns error for invalid header" {
+    var ctx = Context{
+        .request_data = "GET / HTTP/1.1\r\n\r\n",
+        .path = "/",
+        .app_ctx = null,
+        .allocator = std.testing.allocator,
+    };
+    defer ctx.deinit();
+
+    try std.testing.expectError(error.InvalidHeader, ctx.response().header("Bad:Name", "x"));
 }
