@@ -565,6 +565,16 @@ pub const AsyncServer = struct {
         var us = try UdpServer.init(self.allocator, self.rs, bind_addr);
         us.handler = handler;
         us.ctx = self;
+        us.sync = false;
+        self.udp_server = us;
+        try self.udp_server.?.register();
+    }
+
+    pub fn udp4Sync(self: *Self, bind_addr: []const u8, handler: UdpHandler) !void {
+        var us = try UdpServer.init(self.allocator, self.rs, bind_addr);
+        us.handler = handler;
+        us.ctx = self;
+        us.sync = true;
         self.udp_server = us;
         try self.udp_server.?.register();
     }

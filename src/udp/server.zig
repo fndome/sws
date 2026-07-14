@@ -26,6 +26,10 @@ pub const UdpServer = struct {
     handler: ?UdpHandler = null,
     ctx: *anyopaque = undefined,
 
+    /// true: handler 拿到 pool buffer 零 copy（必须同步返回）
+    /// false: onRecvCqe 内部 copy 到 heap 再调 handler（安全用 Next.go/submit）
+    sync: bool = false,
+
     recv_pool: UdpBufferPool,
     recv_buf_idx: u16,
     recv_stalled: bool = false,
@@ -157,14 +161,27 @@ pub const UdpServer = struct {
         }
         const n: usize = @intCast(res);
         const buf_idx = self.recv_buf_idx;
+        const data_buf = self.recv_pool.bufSlice(buf_idx);
 
         if (self.handler) |h| {
             const sender = SenderAddr{
                 .ip = self.recv_addr.addr,
                 .port = @byteSwap(self.recv_addr.port),
             };
-            const data_buf = self.recv_pool.bufSlice(buf_idx);
-            h(sender, data_buf[0..n], self.ctx);
+            if (self.sync) {
+                h(sender, data_buf[0..n], self.ctx);
+            } else {
+                const owned = self.allocator.dupe(u8, data_buf[0..n]) catch {
+                    self.recv_pool.release(buf_idx);
+                    self.submitRecv();
+                    return;
+                };
+                self.recv_pool.release(buf_idx);
+                self.submitRecv();
+                h(sender, owned, self.ctx);
+                self.allocator.free(owned);
+                return;
+            }
         }
         self.recv_pool.release(buf_idx);
         self.submitRecv();
