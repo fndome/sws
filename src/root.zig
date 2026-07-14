@@ -19,6 +19,10 @@ pub const Opcode = @import("ws/types.zig").Opcode;
 pub const TcpServer = @import("tcp/server.zig").TcpServer;
 pub const TcpHandler = @import("tcp/types.zig").TcpHandler;
 
+pub const UdpServer = @import("udp/server.zig").UdpServer;
+pub const UdpHandler = @import("udp/types.zig").UdpHandler;
+pub const SenderAddr = @import("udp/types.zig").SenderAddr;
+
 pub const SubmitQueue = @import("next/queue.zig").SubmitQueue;
 pub const QueueItem = @import("next/queue.zig").Item;
 pub const Next = @import("next/next.zig").Next;

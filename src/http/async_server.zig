@@ -34,6 +34,8 @@ const WsHandler = @import("../ws/server.zig").WsHandler;
 const Opcode = @import("../ws/types.zig").Opcode;
 const TcpServer = @import("../tcp/server.zig").TcpServer;
 const TcpHandler = @import("../tcp/types.zig").TcpHandler;
+const UdpServer = @import("../udp/server.zig").UdpServer;
+const UdpHandler = @import("../udp/types.zig").UdpHandler;
 
 const DnsResolver = @import("../dns/resolver.zig").DnsResolver;
 const RingShared = @import("../shared/ring_shared.zig").RingShared;
@@ -110,6 +112,7 @@ pub const AsyncServer = struct {
 
     ws_server: WsServer,
     tcp_server: TcpServer,
+    udp_server: ?UdpServer = null,
     tcp_listen_fd: i32 = -1,
     tcp_accept_outstanding: bool = false,
     tcp_accept_stalled: bool = false,
@@ -398,6 +401,7 @@ pub const AsyncServer = struct {
         self.ws_server.closeAllActive();
         self.ws_server.deinit();
         self.tcp_server.deinit();
+        if (self.udp_server) |*us| us.deinit();
 
         // Clean up all connections: free resources + release pool slots
         {
@@ -555,6 +559,13 @@ pub const AsyncServer = struct {
         self.tcp_listen_fd = fd;
         self.tcp_server.handler = handler;
         self.tcp_server.ctx = self;
+    }
+
+    pub fn udp(self: *Self, bind_addr: []const u8, handler: UdpHandler) !void {
+        var us = try UdpServer.init(self.allocator, self.rs, bind_addr);
+        us.handler = handler;
+        us.ctx = self;
+        self.udp_server = us;
     }
 
     pub fn invokeOnIoThread(
