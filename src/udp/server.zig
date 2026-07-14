@@ -28,6 +28,7 @@ pub const UdpServer = struct {
 
     recv_pool: UdpBufferPool,
     recv_buf_idx: u16,
+    recv_stalled: bool = false,
     recv_addr: linux.sockaddr.in = undefined,
     recv_iov: std.posix.iovec = undefined,
     recv_hdr: linux.msghdr = undefined,
@@ -113,9 +114,10 @@ pub const UdpServer = struct {
         if (self.recv_outstanding) return;
 
         const slot = self.recv_pool.acquire() orelse {
-            logErr("udp: recv pool exhausted ({d} buffers)", .{UDP_POOL_SIZE});
+            self.recv_stalled = true;
             return;
         };
+        self.recv_stalled = false;
         self.recv_buf_idx = slot.idx;
 
         self.recv_iov = .{
