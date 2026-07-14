@@ -1,6 +1,3 @@
-const std = @import("std");
-const linux = std.os.linux;
-
 pub const SenderAddr = struct {
     ip: u32,
     port: u16,

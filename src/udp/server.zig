@@ -136,7 +136,7 @@ pub const UdpServer = struct {
         const n: usize = @intCast(res);
         if (self.handler) |h| {
             const sender = SenderAddr{
-                .ip = @byteSwap(self.recv_addr.addr),
+                .ip = self.recv_addr.addr,
                 .port = @byteSwap(self.recv_addr.port),
             };
             h(sender, self.recv_buf[0..n], self.ctx);
