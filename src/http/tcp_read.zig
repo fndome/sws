@@ -370,8 +370,9 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             self.respond(conn, 413, "Content Too Large");
             return;
         }
-        if (reassembled_header) {
-            // 修改原因：header 跨 TCP 分片时 effective_buf 是栈上重组副本；进入异步 body 读取后必须保存完整请求头，否则完成 body 后会只看到第二片并误路由。
+        if (reassembled_header or (build_options.tls_enabled and tls_decrypted)) {
+            // 修改原因：reassembled_header 时 effective_buf 指�?combo 栈上副本；TLS 解密时 effective_buf 指�?plaintext_buf 栈上副本。
+            // 进入异步 body 读取后栈已展开，必须�?header 保存�?heap，否则 processBodyRequest 会读到脏数据�?
             const header_copy = self.allocator.dupe(u8, effective_buf[0..headers_end]) catch {
                 self.buffer_pool.markReplenish(bid);
                 conn.read_len = 0;

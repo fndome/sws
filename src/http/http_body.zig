@@ -66,6 +66,10 @@ pub fn onBodyChunk(self: *AsyncServer, conn_id: u64, res: i32) void {
             return;
         }
         const n = @as(usize, @intCast(res));
+        if (slot.line3.large_buf_ptr == 0) {
+            self.closeConn(conn_id, conn.fd);
+            return;
+        }
         const buf: []u8 = @as([*]u8, @ptrFromInt(slot.line3.large_buf_ptr))[0..slot.line3.large_buf_len];
         const window = bodyReadWindow(slot, buf.len) orelse {
             closeInvalidBodyRead(self, conn_id, conn, slot, true);
@@ -96,6 +100,10 @@ pub fn onBodyChunk(self: *AsyncServer, conn_id: u64, res: i32) void {
                 slot.line3.large_buf_ptr = 0;
             }
         }
+        self.closeConn(conn_id, conn.fd);
+        return;
+    }
+    if (slot.line3.large_buf_ptr == 0) {
         self.closeConn(conn_id, conn.fd);
         return;
     }

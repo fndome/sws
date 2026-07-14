@@ -416,6 +416,8 @@ pub const AsyncServer = struct {
                 }
                 if (conn.write_body) |b| self.allocator.free(b);
                 if (conn.ws_token) |t| self.allocator.free(t);
+                if (conn.accum_buf) |buf| self.allocator.free(buf);
+                self.drainWsWriteQueue(conn);
                 if (conn.response_buf) |buf| self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
                 // Release large_pool buffer if connection still holds one
                 if (conn.pool_idx != 0xFFFFFFFF) {
