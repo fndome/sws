@@ -9,6 +9,7 @@ const Fiber = @import("../next/fiber.zig").Fiber;
 const logErr = @import("http_helpers.zig").logErr;
 
 const ACCEPT_USER_DATA = @import("../constants.zig").ACCEPT_USER_DATA;
+const TCP_ACCEPT_USER_DATA = @import("../constants.zig").TCP_ACCEPT_USER_DATA;
 const MAX_CQES_BATCH = @import("../constants.zig").MAX_CQES_BATCH;
 const USER_TASK_BATCH = @import("../constants.zig").USER_TASK_BATCH;
 const CLOSE_USER_DATA_FLAG = @import("../stack_pool.zig").CLOSE_USER_DATA_FLAG;
@@ -59,6 +60,7 @@ pub fn run(self: *AsyncServer) !void {
     // inside init would point at the temporary local. Bind the WebSocket
     // callback context here, after the caller's final server address exists.
     self.ws_server.ctx = self;
+    self.tcp_server.ctx = self;
 
     if (self.cfg.io_cpu) |cpu| {
         var mask: linux.cpu_set_t = [_]usize{0} ** (linux.CPU_SETSIZE / @sizeOf(usize));
@@ -70,6 +72,7 @@ pub fn run(self: *AsyncServer) !void {
     }
 
     try self.submitAccept();
+    try self.submitTcpAccept();
 
     var cqes: [MAX_CQES_BATCH]linux.io_uring_cqe = undefined;
     var user_tasks_buf: [USER_TASK_BATCH]Item = undefined;
@@ -82,9 +85,13 @@ pub fn run(self: *AsyncServer) !void {
         };
 
         if (self.accept_stalled or !self.accept_outstanding) {
-            // 修改原因：短连接关闭 CQE 和 accept CQE 交错时 accept 链可能断掉，主循环要能主动补提。
             self.submitAccept() catch |err| {
                 logErr("accept chain recovery failed: {s}", .{@errorName(err)});
+            };
+        }
+        if (self.tcp_accept_stalled or !self.tcp_accept_outstanding) {
+            self.submitTcpAccept() catch |err| {
+                logErr("tcp accept chain recovery failed: {s}", .{@errorName(err)});
             };
         }
 
@@ -166,6 +173,8 @@ pub fn dispatchCqes(self: *AsyncServer, cqes: []linux.io_uring_cqe, n: usize) vo
 
         if (user_data == ACCEPT_USER_DATA) {
             self.onAcceptComplete(res, user_data);
+        } else if (user_data == TCP_ACCEPT_USER_DATA) {
+            self.onTcpAcceptComplete(res);
         } else if ((user_data & CLOSE_USER_DATA_FLAG) != 0) {
             const raw_ud = user_data & ~CLOSE_USER_DATA_FLAG;
             const close_conn_id: u64 = if (sticker.getSlotChecked(&self.pool, raw_ud)) |slot|
@@ -199,6 +208,10 @@ pub fn dispatchCqes(self: *AsyncServer, cqes: []linux.io_uring_cqe, n: usize) vo
                 self.onWsFrame(conn_id, res, user_data, cqe.flags);
             } else if (conn_ptr.state == .ws_writing) {
                 self.onWsWriteComplete(conn_id, res, user_data);
+            } else if (conn_ptr.state == .tcp_reading) {
+                self.onRawData(conn_id, res, user_data, cqe.flags);
+            } else if (conn_ptr.state == .tcp_writing) {
+                self.onTcpWriteComplete(conn_id, res, user_data);
             } else if (conn_ptr.state == .closing) {
                 if (!conn_ptr.read_buf_recycled and cqe.flags & linux.IORING_CQE_F_BUFFER != 0) {
                     conn_ptr.read_buf_recycled = true;

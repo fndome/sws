@@ -12,6 +12,7 @@ pub const BUFFER_POOL_SIZE = 16384;
 pub const READ_BUF_COUNT = BUFFER_POOL_SIZE;
 pub const READ_BUF_GROUP_ID = 0;
 pub const ACCEPT_USER_DATA: u64 = (1 << 63);
+pub const TCP_ACCEPT_USER_DATA: u64 = 1 << 62;
 pub const MAX_FIXED_FILES = 65535; // 0..65534 valid, 0xFFFF sentinel reserved
 pub const MAX_PATH_LENGTH = 2048;
 pub const IDLE_TIMEOUT_MS = 30000;

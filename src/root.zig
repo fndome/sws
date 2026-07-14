@@ -16,6 +16,9 @@ pub const WsHandler = @import("ws/server.zig").WsHandler;
 pub const Frame = @import("ws/types.zig").Frame;
 pub const Opcode = @import("ws/types.zig").Opcode;
 
+pub const TcpServer = @import("tcp/server.zig").TcpServer;
+pub const TcpHandler = @import("tcp/types.zig").TcpHandler;
+
 pub const SubmitQueue = @import("next/queue.zig").SubmitQueue;
 pub const QueueItem = @import("next/queue.zig").Item;
 pub const Next = @import("next/next.zig").Next;

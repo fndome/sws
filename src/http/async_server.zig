@@ -32,6 +32,8 @@ const readResolvConfNameserver = helpers.readResolvConfNameserver;
 const WsServer = @import("../ws/server.zig").WsServer;
 const WsHandler = @import("../ws/server.zig").WsHandler;
 const Opcode = @import("../ws/types.zig").Opcode;
+const TcpServer = @import("../tcp/server.zig").TcpServer;
+const TcpHandler = @import("../tcp/types.zig").TcpHandler;
 
 const DnsResolver = @import("../dns/resolver.zig").DnsResolver;
 const RingShared = @import("../shared/ring_shared.zig").RingShared;
@@ -43,6 +45,7 @@ const fiber_task = @import("fiber_task.zig");
 const http_fiber = @import("http_fiber.zig");
 const http_body = @import("http_body.zig");
 const ws_handler = @import("ws_handler.zig");
+const tcp_handler = @import("tcp_handler.zig");
 const event_loop = @import("event_loop.zig");
 const http_response = @import("http_response.zig");
 const tcp_accept = @import("tcp_accept.zig");
@@ -106,6 +109,12 @@ pub const AsyncServer = struct {
     fixed_file_next: u16,
 
     ws_server: WsServer,
+    tcp_server: TcpServer,
+    tcp_listen_fd: i32 = -1,
+    tcp_accept_outstanding: bool = false,
+    tcp_accept_stalled: bool = false,
+    tcp_accept_addr: linux.sockaddr = undefined,
+    tcp_accept_addrlen: u32 = @sizeOf(linux.sockaddr),
     middlewares: MiddlewareStore,
     respond_middlewares: MiddlewareStore,
     handlers: std.StringHashMap(Handler),
@@ -344,6 +353,7 @@ pub const AsyncServer = struct {
             .fixed_file_freelist = ff_freelist,
             .fixed_file_next = 0,
             .ws_server = WsServer.init(allocator, ws_handler.wsSendFn),
+            .tcp_server = TcpServer.init(allocator, tcp_handler.tcpSendFn),
             .middlewares = mw_store,
             .respond_middlewares = respond_mw_store,
             .handlers = std.StringHashMap(Handler).init(allocator),
@@ -387,6 +397,7 @@ pub const AsyncServer = struct {
         // and self.pool (slot access) to still be alive.
         self.ws_server.closeAllActive();
         self.ws_server.deinit();
+        self.tcp_server.deinit();
 
         // Clean up all connections: free resources + release pool slots
         {
@@ -430,6 +441,7 @@ pub const AsyncServer = struct {
             }
         }
         _ = linux.close(self.listen_fd);
+        if (self.tcp_listen_fd > 0) _ = linux.close(self.tcp_listen_fd);
         self.connections.deinit();
         self.pool.deinit(self.allocator);
         self.ttl_scan_out.deinit(self.allocator);
@@ -513,6 +525,36 @@ pub const AsyncServer = struct {
         return http_routing.ws(self, path, handler);
     }
 
+    pub fn tcp(self: *Self, listen_addr: []const u8, handler: TcpHandler) !void {
+        const colon = std.mem.indexOfScalar(u8, listen_addr, ':') orelse return error.InvalidListenAddress;
+        const ip_str = listen_addr[0..colon];
+        const port_str = listen_addr[colon + 1 ..];
+        const port = try std.fmt.parseInt(u16, port_str, 10);
+        const ip_addr = try helpers.parseIpv4(ip_str);
+
+        const raw_fd = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, 0);
+        const fd: i32 = @intCast(raw_fd);
+        errdefer _ = linux.close(fd);
+
+        var reuse: i32 = 1;
+        const rc = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, @as([*]const u8, @ptrCast(&reuse)), @sizeOf(i32));
+        if (rc != 0) return error.SetSockOptFailed;
+
+        var addr_in = linux.sockaddr.in{
+            .family = linux.AF.INET,
+            .port = @byteSwap(port),
+            .addr = ip_addr,
+            .zero = [_]u8{0} ** 8,
+        };
+        const len: u32 = @intCast(@sizeOf(linux.sockaddr.in));
+        if (linux.bind(fd, @ptrCast(&addr_in), len) != 0) return error.BindFailed;
+        if (linux.listen(fd, 1024) != 0) return error.ListenFailed;
+
+        self.tcp_listen_fd = fd;
+        self.tcp_server.handler = handler;
+        self.tcp_server.ctx = self;
+    }
+
     pub fn invokeOnIoThread(
         self: *Self,
         comptime T: type,
@@ -530,7 +572,7 @@ pub const AsyncServer = struct {
         return tcp_accept.nextConnId(self);
     }
 
-    fn allocFixedIndex(self: *Self) !u16 {
+    pub fn allocFixedIndex(self: *Self) !u16 {
         return tcp_accept.allocFixedIndex(self);
     }
 
@@ -540,11 +582,19 @@ pub const AsyncServer = struct {
 
     pub fn submitAccept(self: *Self) !void {
         if (self.accept_outstanding) return;
-        // 修改原因：io_uring accept 异步完成后才写 addr/addrlen，不能把栈上局部变量指针提交给内核。
         self.accept_addrlen = @sizeOf(linux.sockaddr);
         _ = try self.ring.accept(ACCEPT_USER_DATA, @intCast(self.listen_fd), &self.accept_addr, &self.accept_addrlen, linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC);
         self.accept_stalled = false;
         self.accept_outstanding = true;
+    }
+
+    pub fn submitTcpAccept(self: *Self) !void {
+        if (!self.tcp_server.hasHandler()) return;
+        if (self.tcp_accept_outstanding) return;
+        self.tcp_accept_addrlen = @sizeOf(linux.sockaddr);
+        _ = try self.ring.accept(constants.TCP_ACCEPT_USER_DATA, @intCast(self.tcp_listen_fd), &self.tcp_accept_addr, &self.tcp_accept_addrlen, linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC);
+        self.tcp_accept_stalled = false;
+        self.tcp_accept_outstanding = true;
     }
 
     pub fn submitRead(self: *Self, conn_id: u64, conn: *Connection) !void {
@@ -713,6 +763,18 @@ pub const AsyncServer = struct {
 
     pub fn drainWsWriteQueue(self: *Self, conn: *Connection) void {
         ws_handler.drainWsWriteQueue(self, conn);
+    }
+
+    pub fn onTcpAcceptComplete(self: *Self, res: i32) void {
+        tcp_handler.onTcpAcceptComplete(self, res);
+    }
+
+    pub fn onRawData(self: *Self, conn_id: u64, res: i32, user_data: u64, cqe_flags: u32) void {
+        tcp_handler.onRawData(self, conn_id, res, user_data, cqe_flags);
+    }
+
+    pub fn onTcpWriteComplete(self: *Self, conn_id: u64, res: i32, user_data: u64) void {
+        tcp_handler.onTcpWriteComplete(self, conn_id, res, user_data);
     }
 
     fn maxWriteRetries(total: usize) u8 {

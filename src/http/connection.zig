@@ -11,6 +11,8 @@ pub const ConnState = if (build_options.tls_enabled) enum(u8) {
     tls_handshaking,
     ws_reading,
     ws_writing,
+    tcp_reading,
+    tcp_writing,
     waiting_computation,
     streaming,
 } else enum(u8) {
@@ -21,6 +23,8 @@ pub const ConnState = if (build_options.tls_enabled) enum(u8) {
     closing,
     ws_reading,
     ws_writing,
+    tcp_reading,
+    tcp_writing,
     waiting_computation,
     streaming,
 };

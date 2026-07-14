@@ -128,6 +128,11 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
                     logErr("accept recovery failed: {s}", .{@errorName(err)});
                 };
             }
+            if (self.tcp_accept_stalled) {
+                self.submitTcpAccept() catch |err| {
+                    logErr("tcp accept recovery failed: {s}", .{@errorName(err)});
+                };
+            }
             return;
         }
 
