@@ -39,7 +39,7 @@ const StackPool = @import("../stack_pool.zig").StackPool;
 const StackSlot = @import("../stack_pool.zig").StackSlot;
 const LargeBufferPool = @import("../shared/large_buffer_pool.zig").LargeBufferPool;
 const sticker = @import("../stack_pool_sticker.zig");
-const ws_fiber = @import("ws_fiber.zig");
+const fiber_task = @import("fiber_task.zig");
 const http_fiber = @import("http_fiber.zig");
 const http_body = @import("http_body.zig");
 const ws_handler = @import("ws_handler.zig");
@@ -53,7 +53,7 @@ const tcp_read = @import("tcp_read.zig");
 const tcp_write = @import("tcp_write.zig");
 const hook_system = @import("hook_system.zig");
 const HttpTaskCtx = http_fiber.HttpTaskCtx;
-const WsTaskCtx = ws_fiber.WsTaskCtx;
+const WsTaskCtx = fiber_task.WsTaskCtx;
 const build_options = @import("build_options");
 
 pub const TlsAuth = struct {

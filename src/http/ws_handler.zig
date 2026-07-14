@@ -12,7 +12,7 @@ const ws_upgrade = @import("../ws/upgrade.zig");
 const helpers = @import("http_helpers.zig");
 const sticker = @import("../stack_pool_sticker.zig");
 const Fiber = @import("../next/fiber.zig").Fiber;
-const ws_fiber = @import("ws_fiber.zig");
+const fiber_task = @import("fiber_task.zig");
 const logErr = helpers.logErr;
 const milliTimestamp = @import("event_loop.zig").milliTimestamp;
 const build_options = @import("build_options");
@@ -365,11 +365,11 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
 
             if (self.shared_fiber_active) {
                 if (self.next) |*n| {
-                    if (n.push(ws_fiber.WsTaskCtx, t.*, ws_fiber.wsTaskExecWrapperWithOwnership, self.cfg.fiber_stack_size_kb * 1024)) {
+                    if (n.push(fiber_task.WsTaskCtx, t.*, fiber_task.wsTaskExecWrapperWithOwnership, self.cfg.fiber_stack_size_kb * 1024)) {
                         self.ws_ctx_pool.destroy(t);
                     } else {
                         // 修改原因：WS 任务入队失败时必须释放复制前持有的 payload，避免池泄漏。
-                        ws_fiber.wsTaskCleanup(t);
+                        fiber_task.wsTaskCleanup(t);
                         self.closeConn(conn_id, conn.fd);
                         return;
                     }
@@ -385,8 +385,8 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
                 self.shared_fiber_active = true;
                 fiber.exec(.{
                     .userCtx = t,
-                    .complete = ws_fiber.wsTaskComplete,
-                    .execFn = ws_fiber.wsTaskExec,
+                    .complete = fiber_task.wsTaskComplete,
+                    .execFn = fiber_task.wsTaskExec,
                 });
                 // If the handler yielded (e.g. DB / DNS wait), do NOT
                 // re-arm the read here. The complete callback fires
