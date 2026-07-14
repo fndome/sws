@@ -43,6 +43,7 @@ pub fn onTcpAcceptComplete(self: *AsyncServer, res: i32) void {
         .gen_id = self.pool.slots[pool_idx].line1.gen_id,
         .active_list_pos = self.pool.slots[pool_idx].line2.active_list_pos,
         .state = .tcp_reading,
+        .keep_alive = true,
     };
 
     if (self.use_fixed_files) {
@@ -198,8 +199,8 @@ pub fn sendTcp(self: *AsyncServer, conn_id: u64, data: []const u8) !void {
     @memcpy(buf[0..data.len], data);
     conn.write_headers_len = data.len;
     conn.write_offset = 0;
-    conn.state = .tcp_writing;
     try self.submitWrite(conn_id, conn);
+    conn.state = .tcp_writing;
 }
 
 pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64) void {
