@@ -5,10 +5,12 @@ const Allocator = std.mem.Allocator;
 const RingShared = @import("../shared/ring_shared.zig").RingShared;
 const UdpHandler = @import("types.zig").UdpHandler;
 const SenderAddr = @import("types.zig").SenderAddr;
+const UdpBufferPool = @import("buffer.zig").UdpBufferPool;
 const helpers = @import("../http/http_helpers.zig");
 const logErr = helpers.logErr;
 
-const MAX_UDP_PAYLOAD: usize = 65536;
+const MAX_UDP_PAYLOAD = @import("../constants.zig").UDP_RECV_BUF_SIZE;
+const UDP_POOL_SIZE = @import("../constants.zig").UDP_RECV_POOL_SIZE;
 
 fn udpDispatch(ptr: *anyopaque, user_data: u64, res: i32) void {
     _ = user_data;
@@ -23,7 +25,9 @@ pub const UdpServer = struct {
     udp_ud: u64,
     handler: ?UdpHandler = null,
     ctx: *anyopaque = undefined,
-    recv_buf: [MAX_UDP_PAYLOAD]u8 align(8) = [_]u8{0} ** MAX_UDP_PAYLOAD,
+
+    recv_pool: UdpBufferPool,
+    recv_buf_idx: u16,
     recv_addr: linux.sockaddr.in = undefined,
     recv_iov: std.posix.iovec = undefined,
     recv_hdr: linux.msghdr = undefined,
@@ -55,11 +59,16 @@ pub const UdpServer = struct {
             return error.BindFailed;
         }
 
+        var recv_pool = try UdpBufferPool.init(allocator, UDP_POOL_SIZE);
+        errdefer recv_pool.deinit(allocator);
+
         return UdpServer{
             .allocator = allocator,
             .rs = rs,
             .udp_fd = fd,
             .udp_ud = 0,
+            .recv_pool = recv_pool,
+            .recv_buf_idx = 0,
         };
     }
 
@@ -74,6 +83,7 @@ pub const UdpServer = struct {
             _ = linux.close(self.udp_fd);
             self.udp_fd = -1;
         }
+        self.recv_pool.deinit(self.allocator);
     }
 
     pub fn send(self: *UdpServer, addr: SenderAddr, data: []const u8) void {
@@ -102,9 +112,15 @@ pub const UdpServer = struct {
     fn submitRecv(self: *UdpServer) void {
         if (self.recv_outstanding) return;
 
+        const slot = self.recv_pool.acquire() orelse {
+            logErr("udp: recv pool exhausted ({d} buffers)", .{UDP_POOL_SIZE});
+            return;
+        };
+        self.recv_buf_idx = slot.idx;
+
         self.recv_iov = .{
-            .base = @as(?*anyopaque, &self.recv_buf),
-            .len = self.recv_buf.len,
+            .base = @as(?*anyopaque, slot.buf.ptr),
+            .len = slot.buf.len,
         };
         self.recv_hdr = .{
             .name = @ptrCast(&self.recv_addr),
@@ -116,8 +132,11 @@ pub const UdpServer = struct {
             .flags = 0,
         };
 
-        const sqe = self.rs.ring.nop(self.udp_ud) catch return;
-        sqe.opcode = @enumFromInt(10); // IORING_OP_RECVMSG
+        const sqe = self.rs.ring.nop(self.udp_ud) catch {
+            self.recv_pool.release(slot.idx);
+            return;
+        };
+        sqe.opcode = @enumFromInt(10);
         sqe.fd = self.udp_fd;
         sqe.addr = @intFromPtr(&self.recv_hdr);
         sqe.len = 1;
@@ -130,17 +149,22 @@ pub const UdpServer = struct {
     fn onRecvCqe(self: *UdpServer, res: i32) void {
         self.recv_outstanding = false;
         if (res <= 0) {
+            self.recv_pool.release(self.recv_buf_idx);
             self.submitRecv();
             return;
         }
         const n: usize = @intCast(res);
+        const buf_idx = self.recv_buf_idx;
+
         if (self.handler) |h| {
             const sender = SenderAddr{
                 .ip = self.recv_addr.addr,
                 .port = @byteSwap(self.recv_addr.port),
             };
-            h(sender, self.recv_buf[0..n], self.ctx);
+            const data_buf = self.recv_pool.bufSlice(buf_idx);
+            h(sender, data_buf[0..n], self.ctx);
         }
+        self.recv_pool.release(buf_idx);
         self.submitRecv();
     }
 };

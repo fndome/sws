@@ -21,6 +21,9 @@ pub const MAX_CONNECTIONS = 1_048_576;
 
 pub const USER_TASK_BATCH = 64;
 
+pub const UDP_RECV_BUF_SIZE: usize = 65536;
+pub const UDP_RECV_POOL_SIZE: u16 = 256;
+
 /// Size classes for tiered write buffer pool, like greatws bytespool.
 /// 512B for status codes, 1KB-4KB for API responses, 8KB-64KB for larger payloads.
 pub const TIER_SIZES = [_]usize{ 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536 };
