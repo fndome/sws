@@ -2,7 +2,7 @@
 
 [中文文档](README_CN.md)
 
-`io_uring` based Single Worker Server (HTTP + WebSocket) on Linux, in Zig 0.16.0.
+`io_uring` based Single Worker Server (HTTP + WebSocket + Raw TCP + UDP) on Linux, in Zig 0.16.0.
 
 ## Project Goal
 
@@ -16,6 +16,10 @@ Current scope:
 - HTTP/1.1 server: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, JSON/text/html
   responses, request body helpers, middleware, keep-alive boundaries.
 - WebSocket: HTTP/1.1 upgrade, frame parse/write, ping/pong/close handling.
+- Raw TCP: second listen port, zero-copy byte dispatch, shared `accum_buf`
+  buffer reassembly with WebSocket.
+- Raw UDP: single fd `IORING_OP_RECVMSG`, slab buffer pool, sync/async
+  handler modes via `server.udp()` / `server.udp4Sync()`.
 - DNS and outbound HTTP client: async UDP DNS, small TTL cache, keep-alive
   connection reuse.
 - Linux + `io_uring` only. TLS/HTTPS/WSS via pure-Zig tls.zig library, bundled in `lib/`.
@@ -188,7 +192,8 @@ src/http/
 ├── http_fiber.zig     (182)  HttpTaskCtx + httpTaskExec/Cleanup/Complete
 ├── http_body.zig      (110)  submitBodyRead / onBodyChunk / onStreamRead
 ├── ws_handler.zig     (381)  tryWsUpgrade / onWsFrame / sendWsFrame / write queue
-├── ws_fiber.zig       ( 50)  WsTaskCtx + wsTaskExec/Cleanup/Complete
+├── fiber_task.zig     ( 50)  fiber task context (shared by WS + raw TCP)
+├── tcp_handler.zig    (187)  onTcpAcceptComplete / onRawData / sendTcp / onTcpWriteComplete
 ├── tcp_accept.zig     (114)  onAcceptComplete / allocFixedIndex
 ├── tcp_read.zig       (367)  submitRead / onReadComplete (header parse + body route)
 ├── tcp_write.zig      (128)  submitWrite / onWriteComplete
@@ -199,6 +204,15 @@ src/http/
 ├── types.zig          (  5)  Middleware / Handler types
 ├── http_helpers.zig   ( 87)  request parsing utilities
 └── middleware_store.zig( 28)  MiddlewareStore
+
+src/tcp/
+├── types.zig          (  1)  TcpHandler type
+└── server.zig         ( 52)  TcpServer — handler registry + send API
+
+src/udp/
+├── types.zig          ( 16)  SenderAddr + UdpHandler type
+├── buffer.zig         ( 75)  UdpBufferPool — slab buffer pool
+└── server.zig         (203)  UdpServer — init/bind/send, sync/async handler modes
 
 src/client/
 ├── http_client.zig    (1132) HttpClient — dedicated-thread, fiber-driven HTTP client
@@ -813,6 +827,35 @@ WS handlers may offload frame data asynchronously, so frame payloads must remain
 
 **~110ns overhead per frame**. 1M connections, 1% active, 10 msg/s each = 100K msg/s:
 - CPU: 100K × 110ns = **11ms/s = 1.1% of one core**
+
+## Raw TCP
+
+```zig
+fn myTcpHandler(conn_id: u64, data: []u8) void {
+    server.tcp_server.send(conn_id, "pong\n");
+}
+
+try server.tcp("0.0.0.0:9000", myTcpHandler);
+```
+
+Raw TCP connections skip HTTP parsing entirely. Bytes are delivered directly to the handler. Shared `accum_buf` buffer reassembly with WebSocket path. Connections default to keep-alive; set `conn.keep_alive = false` to close after each write.
+
+## Raw UDP
+
+```zig
+fn dnsHandler(sender: sws.SenderAddr, data: []u8, ctx: *anyopaque) void {
+    const server: *sws.AsyncServer = @ptrCast(@alignCast(ctx));
+    server.udp_server.send(sender, response);
+}
+
+// Default: framework heap-copies data → safe for Next.go/submit
+try server.udp("0.0.0.0:5353", dnsHandler);
+
+// Zero-copy: handler receives pool slab buffer → must complete synchronously
+try server.udp4Sync("0.0.0.0:1234", ntpHandler);
+```
+
+Single UDP socket via `IORING_OP_RECVMSG`. Pre-allocated slab buffer pool (`UdpBufferPool`, 256 × 64KB) eliminates per-packet heap allocation. Sync mode (`udp4Sync`) delivers pool buffer directly — sub-μs overhead.
 
 ## TLS / HTTPS / WSS
 

@@ -1,6 +1,6 @@
 # sws — 单线程服务器
 
-基于 Linux `io_uring` 的单线程 HTTP + WebSocket 服务器，Zig 0.16.0。
+基于 Linux `io_uring` 的单线程 HTTP + WebSocket + TCP + UDP 服务器，Zig 0.16.0。
 
 ## 项目目标
 
@@ -669,6 +669,21 @@ exe.linkSystemLibrary("cares");
 const HttpCaresDns = sws.HttpCaresDns;
 // ring.dns = HttpCaresDns.init(alloc, ring.rs);
 ```
+
+## Raw TCP / Raw UDP
+
+```zig
+// Raw TCP — 字节原样交付，跳过 HTTP 解析
+try server.tcp("0.0.0.0:9000", tcpHandler);
+
+// Raw UDP — 默认模式，框架拷贝到 heap，可安全用 Next.go
+try server.udp("0.0.0.0:5353", dnsHandler);
+
+// Raw UDP 零拷贝 — handler 必须在返回前完成同步处理
+try server.udp4Sync("0.0.0.0:1234", ntpHandler);
+```
+
+详细用法参见 [README.md](README.md) 中 Raw TCP / Raw UDP 章节。
 
 ## License
 
