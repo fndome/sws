@@ -26,8 +26,8 @@ pub const UdpServer = struct {
     handler: ?UdpHandler = null,
     ctx: *anyopaque = undefined,
 
-    /// true: handler 拿到 pool buffer 零 copy（必须同步返回）
-    /// false: onRecvCqe 内部 copy 到 heap 再调 handler（安全用 Next.go/submit）
+    /// true: handler receives pool slab buffer directly (zero-copy, synchronous only).
+    /// false: onRecvCqe heap-copies data before calling handler (safe for Next.go/submit).
     sync: bool = false,
 
     recv_pool: UdpBufferPool,
