@@ -263,7 +263,7 @@ fn retryPendingWrites(self: *AsyncServer) void {
     while (i < count) : (i += 1) {
         const conn_id = self.pending_writes.items[i];
         if (getConn(self, conn_id)) |conn| {
-            if (conn.state == .writing or conn.state == .ws_writing) {
+            if (conn.state == .writing or conn.state == .ws_writing or conn.state == .tcp_writing) {
                 self.submitWrite(conn_id, conn) catch |err| {
                     if (err != error.WriteInFlight) break;
                 };
