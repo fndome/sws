@@ -566,6 +566,7 @@ pub const AsyncServer = struct {
         us.handler = handler;
         us.ctx = self;
         self.udp_server = us;
+        try self.udp_server.?.register();
     }
 
     pub fn invokeOnIoThread(

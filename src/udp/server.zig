@@ -55,16 +55,17 @@ pub const UdpServer = struct {
             return error.BindFailed;
         }
 
-        const udp_ud = try rs.alloc(@ptrCast(@constCast(&fd)), &udpDispatch);
-
-        var self = UdpServer{
+        return UdpServer{
             .allocator = allocator,
             .rs = rs,
             .udp_fd = fd,
-            .udp_ud = udp_ud,
+            .udp_ud = 0,
         };
+    }
+
+    pub fn register(self: *UdpServer) !void {
+        self.udp_ud = try self.rs.alloc(@ptrCast(@constCast(self)), &udpDispatch);
         self.submitRecv();
-        return self;
     }
 
     pub fn deinit(self: *UdpServer) void {
