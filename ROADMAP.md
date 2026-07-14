@@ -78,7 +78,19 @@ Users who only need the outbound HTTP client no longer pull in the entire server
 
 ### Pre-1.0
 
-Keep the monorepo. All internal refactoring (fiber_task rename, SlotPool generalization, buffer pool extraction) happens here to prepare for the split. Back-compat shims may be needed during the transition.
+Keep the monorepo — Zig's build system, package manager, and stdlib APIs are still in flux.
+Coordinating three repos through unstable `build.zig.zon` and `--dep` semantics would create
+more friction than it removes. All internal refactoring (fiber_task rename, SlotPool
+generalization, buffer pool extraction) happens here to prepare for the eventual split.
+
+### Why not split now
+
+- `zig fetch` / `b.dependency()` semantics change between minor Zig versions.
+- Cross-repo CI requires pinning the same Zig version across all repos — brittle.
+- Large internal refactors (e.g. generic `SlotPool(T)`) touch files across module
+  boundaries; doing that across three repos requires atomic cross-repo PRs.
+- Monorepo single `zig build` ensures all tests pass atomically for every commit.
+- The current ~12K lines is well within monorepo sustainable scale.
 
 ### Zig versions
 
