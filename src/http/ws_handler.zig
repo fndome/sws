@@ -21,7 +21,7 @@ const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
 const MAX_WS_ACCUMULATED_FRAME_SIZE: usize = 1024 * 1024;
 
 fn wsFrameInput(allocator: Allocator, conn: *Connection, data: []u8, owned_out: *?[]u8) ![]u8 {
-    const partial = conn.ws_partial orelse return data;
+    const partial = conn.accum_buf orelse return data;
     if (partial.len > MAX_WS_ACCUMULATED_FRAME_SIZE or
         data.len > MAX_WS_ACCUMULATED_FRAME_SIZE - partial.len)
     {
@@ -32,7 +32,7 @@ fn wsFrameInput(allocator: Allocator, conn: *Connection, data: []u8, owned_out: 
     @memcpy(combined[0..partial.len], partial);
     @memcpy(combined[partial.len..], data);
     allocator.free(partial);
-    conn.ws_partial = null;
+    conn.accum_buf = null;
     owned_out.* = combined;
     return combined;
 }
@@ -40,11 +40,11 @@ fn wsFrameInput(allocator: Allocator, conn: *Connection, data: []u8, owned_out: 
 fn storeIncompleteWsFrame(allocator: Allocator, conn: *Connection, data: []u8, owned_data: *?[]u8) !void {
     if (data.len > MAX_WS_ACCUMULATED_FRAME_SIZE) return error.FrameTooLarge;
     if (owned_data.*) |owned| {
-        conn.ws_partial = owned;
+        conn.accum_buf = owned;
         owned_data.* = null;
         return;
     }
-    conn.ws_partial = try allocator.dupe(u8, data);
+    conn.accum_buf = try allocator.dupe(u8, data);
 }
 
 fn finishSynchronousWsHandler(self: *AsyncServer, conn_id: u64, conn: *Connection, bid: u16) void {
@@ -568,17 +568,17 @@ test "WebSocket frame input accumulates split TCP reads" {
     var conn = Connection{};
     var owned: ?[]u8 = null;
     defer if (owned) |buf| std.testing.allocator.free(buf);
-    defer if (conn.ws_partial) |buf| std.testing.allocator.free(buf);
+    defer if (conn.accum_buf) |buf| std.testing.allocator.free(buf);
 
     var first = [_]u8{ 0x81, 0x85, 1, 2, 3, 4, 0x69, 0x67 };
     const first_input = try wsFrameInput(std.testing.allocator, &conn, first[0..], &owned);
     try std.testing.expectError(error.IncompleteFrame, ws_frame.parseFrame(first_input));
     try storeIncompleteWsFrame(std.testing.allocator, &conn, first_input, &owned);
-    try std.testing.expect(conn.ws_partial != null);
+    try std.testing.expect(conn.accum_buf != null);
 
     var second = [_]u8{ 0x6f, 0x68, 0x6e };
     const full_input = try wsFrameInput(std.testing.allocator, &conn, second[0..], &owned);
-    try std.testing.expect(conn.ws_partial == null);
+    try std.testing.expect(conn.accum_buf == null);
 
     const frame = try ws_frame.parseFrame(full_input);
     try std.testing.expectEqual(Opcode.text, frame.opcode);
@@ -587,8 +587,8 @@ test "WebSocket frame input accumulates split TCP reads" {
 
 test "WebSocket frame input rejects accumulated overflow" {
     var conn = Connection{};
-    conn.ws_partial = try std.testing.allocator.alloc(u8, MAX_WS_ACCUMULATED_FRAME_SIZE);
-    defer if (conn.ws_partial) |buf| std.testing.allocator.free(buf);
+    conn.accum_buf = try std.testing.allocator.alloc(u8, MAX_WS_ACCUMULATED_FRAME_SIZE);
+    defer if (conn.accum_buf) |buf| std.testing.allocator.free(buf);
 
     var owned: ?[]u8 = null;
     var extra = [_]u8{0};

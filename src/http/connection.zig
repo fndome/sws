@@ -44,7 +44,7 @@ pub const Connection = struct {
     last_active_ms: i64 = 0,
     write_start_ms: i64 = 0,
     ws_token: ?[]const u8 = null,
-    ws_partial: ?[]u8 = null,
+    accum_buf: ?[]u8 = null,
     write_retries: u8 = 0,
     /// 读 buffer 是否已归还 io_uring provided buffer pool（防止二次回收）
     read_buf_recycled: bool = false,
