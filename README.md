@@ -181,50 +181,97 @@ pub fn main() !void {
 
 ## Architecture
 
-### Source Layout (refactored)
+### Source Layout
 
 ```
-src/http/
-├── async_server.zig   (526)  facade — init/deinit + public API forwarding
-├── event_loop.zig     (215)  run / dispatchCqes / drain* / TTL
-├── http_routing.zig   (310)  use / GET/POST / processBodyRequest + fiber dispatch
-├── http_response.zig  (163)  respond / respondJson / respondZeroCopy
-├── http_fiber.zig     (182)  HttpTaskCtx + httpTaskExec/Cleanup/Complete
-├── http_body.zig      (110)  submitBodyRead / onBodyChunk / onStreamRead
-├── ws_handler.zig     (381)  tryWsUpgrade / onWsFrame / sendWsFrame / write queue
-├── fiber_task.zig     ( 50)  fiber task context (shared by WS + raw TCP)
-├── tcp_handler.zig    (187)  onTcpAcceptComplete / onRawData / sendTcp / onTcpWriteComplete
-├── tcp_accept.zig     (114)  onAcceptComplete / allocFixedIndex
-├── tcp_read.zig       (367)  submitRead / onReadComplete (header parse + body route)
-├── tcp_write.zig      (128)  submitWrite / onWriteComplete
-├── connection_mgr.zig ( 82)  closeConn / getConn / nextUserData
-├── hook_system.zig    ( 48)  DeferredNode / addHook* / sendDeferredResponse
-├── connection.zig     ( 51)  Connection type
-├── context.zig        (118)  Context type
-├── types.zig          (  5)  Middleware / Handler types
-├── http_helpers.zig   ( 87)  request parsing utilities
-└── middleware_store.zig( 28)  MiddlewareStore
+src/
+├── root.zig            (116)  public API — init, handlers, hooks, Next
+├── deferred.zig        ( 39)  DeferredResponse — send JSON/text from any thread
+├── constants.zig       ( 31)  shared constants
+├── antpath.zig         ( 79)  ant-style path matching (/user/*)
+├── async_logger.zig    ( 98)  async ring-buffer logger
+├── buffer_pool.zig     (182)  tiered write buffer pool (8 size classes)
+├── stack_pool.zig      (299)  O(1) pre-allocated connection slot pool
+├── stack_pool_sticker.zig (362) CQE dispatch sticker for StackPool
+├── spsc_ringbuffer.zig (193)  SPSC queue for Next.go() tasks
 
-src/tcp/
-├── types.zig          (  1)  TcpHandler type
-└── server.zig         ( 52)  TcpServer — handler registry + send API
+src/http/               (5787 lines)
+├── async_server.zig    (819)  facade — init/deinit + public API forwarding
+├── event_loop.zig      (448)  run / dispatchCqes / drain* / TTL
+├── http_routing.zig    (618)  use / GET/POST / processBodyRequest + fiber dispatch
+├── http_response.zig   (182)  respond / respondJson / respondZeroCopy
+├── http_fiber.zig      (215)  HttpTaskCtx + httpTaskExec/Cleanup/Complete
+├── http_body.zig       (202)  submitBodyRead / onBodyChunk / onStreamRead
+├── http_parser.zig     (152)  incremental HTTP parser
+├── http_helpers.zig    (210)  request parsing utilities
+├── ws_handler.zig      (611)  tryWsUpgrade / onWsFrame / sendWsFrame / write queue
+├── fiber_task.zig      ( 71)  fiber task context (shared by WS + raw TCP)
+├── tcp_handler.zig     (265)  onTcpAcceptComplete / onRawData / sendTcp
+├── tcp_accept.zig      (167)  onAcceptComplete / allocFixedIndex
+├── tcp_read.zig        (759)  submitRead / onReadComplete (header parse + body route)
+├── tcp_write.zig       (342)  submitWrite / onWriteComplete
+├── connection_mgr.zig  (168)  closeConn / getConn / nextUserData
+├── connection.zig      ( 78)  Connection type
+├── hook_system.zig     ( 59)  DeferredNode / addHook* / sendDeferredResponse
+├── context.zig         (381)  Context type + ResponseBuilder chain API
+├── types.zig           (  7)  Middleware / Handler types
+└── middleware_store.zig( 33)  MiddlewareStore
 
-src/udp/
-├── types.zig          ( 16)  SenderAddr + UdpHandler type
-├── buffer.zig         ( 75)  UdpBufferPool — slab buffer pool
-└── server.zig         (203)  UdpServer — init/bind/send, sync/async handler modes
+src/next/               (1183 lines)
+├── next.zig            (603)  Next.go / Next.submit / worker pool + tick
+├── fiber.zig           (206)  x86_64/ARM64 fiber implementation
+├── pipe.zig            (179)  push-to-pull adapter for sync-protocol libs
+├── chunk_stream.zig    (130)  chunked transfer stream
+└── queue.zig           ( 65)  lock-free invoke queue
 
-src/client/
-├── http_client.zig    (1132) HttpClient — dedicated-thread, fiber-driven HTTP client
-├── ring.zig           ( 154) RingB — io_uring ring + DNS + TinyCache + InvokeQueue
-├── tiny_cache.zig     ( 267) per-host keep-alive connection pool
-├── dns.zig            ( 184) c-ares async DNS adapter
+src/ws/                 (651 lines)
+├── frame.zig           (254)  WebSocket frame parse/write + masking
+├── upgrade.zig         (212)  HTTP → WS upgrade handshake
+├── server.zig          (159)  WebSocket server registry
+└── types.zig           ( 26)  WebSocket types
+
+src/client/             (1832 lines)
+├── http_client.zig    (1209)  HttpClient — dedicated-thread, fiber-driven HTTP client
+├── ring.zig           ( 152)  RingB — io_uring ring + DNS + TinyCache + InvokeQueue
+├── tiny_cache.zig     ( 273)  per-host keep-alive connection pool
+├── dns.zig            ( 198)  c-ares async DNS adapter
 └── README.md                 → [Why sws ships its own io_uring HTTP client](src/client/README.md)
+
+src/dns/                (991 lines)
+├── resolver.zig       (339)  io_uring async UDP DNS resolver
+├── packet.zig         (452)  DNS packet builder/parser
+└── cache.zig          (200)  TTL DNS cache
+
+src/shared/             (955 lines)
+├── tcp_stream.zig     (654)  RingSharedClient — io_uring outbound TCP client
+├── large_buffer_pool.zig (108) 64 × 1MB pre-allocated blocks
+├── io_registry.zig    ( 84)  client fd callback registry
+├── ring_shared.zig    ( 55)  RingShared — single ring + registry + invoke
+└── io_invoke.zig      ( 54)  cross-thread CAS callback queue
+
+src/tls/                (340 lines)
+├── tls.zig            (235)  TLS 1.3 integration via lib/tls.zig
+└── noop.zig           (105)  TLS no-op stub (plaintext mode)
+
+src/udp/                (294 lines)
+├── server.zig         (203)  UdpServer — init/bind/send, sync/async handler modes
+├── buffer.zig         ( 75)  UdpBufferPool — slab buffer pool
+└── types.zig          ( 16)  SenderAddr + UdpHandler type
+
+src/dev/                (548 lines)
+├── server.zig         (314)  development server with auto-restart
+├── compat.zig         ( 87)  platform compatibility layer
+├── io.zig             ( 15)  IO abstraction interface
+├── io_win.zig         ( 74)  Windows IO backend
+└── io_posix.zig       ( 58)  POSIX IO backend
+
+src/tcp/                ( 53 lines)
+├── server.zig         ( 52)  TcpServer — handler registry + send API
+└── types.zig          (  1)  TcpHandler type
 ```
 
-Extracted from a 2725-line God Object in 5 sessions. Each module ≤381 lines, single responsibility. `async_server.zig` is now 526 lines of pure struct definition + init/deinit + forwarding shell.
+Total: **~14,255 lines** across 64 source files.
 
-### Single IO thread + fiber
 
 The entire event loop runs on **one IO thread**. Handlers execute as **fibers** (user-space coroutines) on the same thread.
 

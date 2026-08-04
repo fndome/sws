@@ -20,7 +20,7 @@
 | TLS | 纯 Zig TLS 1.3 (自研, lib/tls.zig) | std.crypto.tls.Client 封装 |
 | DNS | 自建 io_uring UDP DNS + TTL 缓存 | getaddrinfo / 自定义 resolve |
 | 对外发布 | example server 形式构建 | 标准 Zig 库 (libhttpx.a, zig fetch) |
-| 代码量 | ~12,000 行 | ~20,400 行 |
+| 代码量 | ~14,300 行 | ~20,400 行 |
 | 依赖 | libc, tls.zig (bundled) | 零外部依赖 |
 
 ---
