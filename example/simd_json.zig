@@ -243,7 +243,12 @@ pub const JsonWriter = struct {
             .array => |arr| {
                 if (arr.child == u8) {
                     // u8 array -> string
-                    try self.writeString(&value);
+                    if (arr.sentinel()) |_| {
+                        // Strip sentinel (e.g. [N:0]u8 string literals)
+                        try self.writeString(value[0..arr.len]);
+                    } else {
+                        try self.writeString(&value);
+                    }
                 } else {
                     // Other arrays -> JSON array
                     try self.writeByte('[');
@@ -376,6 +381,19 @@ test "string escaping" {
     // Test newline escaping
     const newline_result = try stringify(&buffer, .{ .text = "line1\nline2" });
     try std.testing.expectEqualStrings("{\"text\":\"line1\\nline2\"}", newline_result);
+}
+
+test "sentinel array (string literal) serialization" {
+    var buffer: [256]u8 = undefined;
+
+    // String literal "[5:0]u8" - must NOT include the null terminator
+    const str_result = try stringify(&buffer, .{ .value = "hello" });
+    try std.testing.expectEqualStrings("{\"value\":\"hello\"}", str_result);
+
+    // Fixed-size u8 array without sentinel
+    const fixed: [3]u8 = .{ 'a', 'b', 'c' };
+    const arr_result = try stringify(&buffer, .{ .value = fixed });
+    try std.testing.expectEqualStrings("{\"value\":\"abc\"}", arr_result);
 }
 
 test "null and optional" {
