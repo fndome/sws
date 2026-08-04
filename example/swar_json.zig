@@ -1,6 +1,8 @@
-// SIMD-accelerated JSON serialization
+// SWAR-based JSON serialization
 //
-// Serialization uses SWAR (SIMD Within A Register) for fast string escaping
+// Serialization uses SWAR (SIMD Within A Register) for fast string escaping:
+// processes 8 bytes per 64-bit register using bitwise operations.
+// Note: SWAR is NOT true SIMD — it uses scalar registers, not vector units.
 // Based on V8's JSON.stringify optimizations
 //
 // Performance targets:
@@ -9,7 +11,7 @@
 // - Zero-copy for strings without escape characters
 //
 // For parsing, use std.json which provides good performance for most use cases.
-// When zimdjson adds Zig 0.16 support, we can integrate it for SIMD parsing.
+// For SIMD-accelerated parsing, see simdjson-z (Zig port of simdjson).
 
 const std = @import("std");
 
