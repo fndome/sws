@@ -19,7 +19,6 @@ const SWAR = struct {
     // Characters that need escaping: " (0x22), \ (0x5C), and control chars (0x00-0x1F)
     const QUOTE: u64 = 0x2222222222222222;
     const BACKSLASH: u64 = 0x5C5C5C5C5C5C5C5C;
-    const LOW_NIBBLE_MASK: u64 = 0x0F0F0F0F0F0F0F0F;
     const HIGH_BIT_MASK: u64 = 0x8080808080808080;
     const CONTROL_CHAR_LIMIT: u64 = 0x2020202020202020; // Space (0x20) - anything below needs escaping
 
@@ -28,8 +27,9 @@ const SWAR = struct {
     inline fn hasEscapeChar(chunk: u64) bool {
         // Check for control characters (< 0x20)
         // If (byte - 0x20) has high bit set, byte was < 0x20
+        // ~chunk prevents borrow cascade and false positives for bytes >= 0x80
         const ctrl_check = chunk -% CONTROL_CHAR_LIMIT;
-        const has_ctrl = (ctrl_check & HIGH_BIT_MASK) != 0;
+        const has_ctrl = (ctrl_check & ~chunk & HIGH_BIT_MASK) != 0;
 
         // Check for quote (0x22)
         const xor_quote = chunk ^ QUOTE;
@@ -44,24 +44,6 @@ const SWAR = struct {
         return has_ctrl or has_quote or has_backslash;
     }
 };
-
-/// Escape table for control characters
-const escape_table: [32][]const u8 = init_escape_table();
-
-fn init_escape_table() [32][]const u8 {
-    var table: [32][]const u8 = undefined;
-    for (0..32) |i| {
-        table[i] = switch (i) {
-            '\n' => "\\n",
-            '\r' => "\\r",
-            '\t' => "\\t",
-            0x08 => "\\b", // backspace
-            0x0C => "\\f", // form feed
-            else => "\\u0000", // will be filled with actual hex
-        };
-    }
-    return table;
-}
 
 /// Fast JSON string writer that writes directly to a buffer
 pub const JsonWriter = struct {
@@ -178,6 +160,9 @@ pub const JsonWriter = struct {
 
     /// Write a float
     pub fn writeFloat(self: *Self, value: anytype) !void {
+        if (std.math.isNan(value) or std.math.isInf(value)) {
+            return error.InvalidFloat;
+        }
         const buf = std.fmt.bufPrint(self.buffer[self.pos..], "{d}", .{value}) catch return error.BufferOverflow;
         self.pos += buf.len;
     }
@@ -348,6 +333,14 @@ test "SWAR escape detection" {
     // Contains newline
     const with_newline: u64 = 0x616263640A656667; // "abcd\nefg"
     try std.testing.expect(SWAR.hasEscapeChar(with_newline));
+
+    // Non-ASCII UTF-8 (>= 0x80) should NOT trigger false positives
+    const utf8: u64 = 0xBFBDBE80E4B8ADE6; // continuation bytes + CJK lead bytes
+    try std.testing.expect(!SWAR.hasEscapeChar(utf8));
+
+    // Boundary: 0xA0 should not trigger (regression test for missing ~chunk mask)
+    const with_a0: u64 = 0xA0A0A0A0A0A0A0A0;
+    try std.testing.expect(!SWAR.hasEscapeChar(with_a0));
 }
 
 test "simple object serialization" {
