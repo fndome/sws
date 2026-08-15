@@ -163,7 +163,7 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
             closeConn(self, conn_id, 0);
             return;
         };
-        sqe.opcode = @enumFromInt(19);
+        sqe.opcode = .CLOSE;
         sqe.fd = fd;
     }
 }

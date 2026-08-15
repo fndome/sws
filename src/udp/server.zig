@@ -142,7 +142,7 @@ pub const UdpServer = struct {
             self.recv_pool.release(slot.idx);
             return;
         };
-        sqe.opcode = @enumFromInt(10);
+        sqe.opcode = .RECVMSG;
         sqe.fd = self.udp_fd;
         sqe.addr = @intFromPtr(&self.recv_hdr);
         sqe.len = 1;

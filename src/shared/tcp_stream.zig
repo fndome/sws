@@ -193,7 +193,7 @@ pub const RingSharedClient = struct {
         if (!hasConnectSqeCapacity(@intCast(ring.sq_ready()), ring.sq.sqes.len, timeout_ms)) return error.ConnectSubmitQueueFull;
         // 修改原因：CONNECT SQE 都拿不到时不能静默成功，否则连接会永久停在 connecting 且 fd/registry 无法回收。
         const sqe = ring.nop(self.id) catch return error.ConnectSubmitQueueFull;
-        sqe.opcode = @enumFromInt(27); // IORING_OP_CONNECT
+        sqe.opcode = .CONNECT;
         sqe.fd = self.fd;
         sqe.addr = @intFromPtr(&self.connect_addr);
         sqe.off = self._connect_addrlen;
@@ -203,7 +203,7 @@ pub const RingSharedClient = struct {
                 return error.ConnectSubmitQueueFull;
             };
             sqe.flags |= linux.IOSQE_IO_LINK; // link LINK_TIMEOUT next
-            tsqe.opcode = @enumFromInt(15); // IORING_OP_LINK_TIMEOUT
+            tsqe.opcode = .LINK_TIMEOUT;
             // 修改原因：LINK_TIMEOUT 的 timespec 会被内核异步读取，不能指向本函数的栈变量。
             self.connect_timeout_ts = .{
                 .sec = @intCast(timeout_ms / 1000),

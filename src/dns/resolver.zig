@@ -204,7 +204,7 @@ pub const DnsResolver = struct {
     fn submitRecv(self: *DnsResolver) void {
         if (self.recv_outstanding) return;
         const sqe = self.rs.ring.nop(self.dns_ud) catch return;
-        sqe.opcode = @enumFromInt(28); // IORING_OP_RECV
+        sqe.opcode = .RECV;
         sqe.fd = self.udp_fd;
         sqe.addr = @intFromPtr(&self.recv_buf);
         sqe.len = self.recv_buf.len;
