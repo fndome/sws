@@ -141,7 +141,12 @@ pub fn ttlScan(
             now_ms - slot.line2.last_active_ms >= timeout_ms * 2;
         if (slot.line1.state == .processing and !hung) continue;
 
-        const idle_expired = now_ms - slot.line2.last_active_ms >= timeout_ms;
+        // Write activity refreshes write_start_ms (set on write start, reset on
+        // each partial completion) but NOT last_active_ms. Treat the more recent
+        // of the two as the last-activity time so an actively-writing (slow)
+        // connection is not killed by the idle TTL before write_timeout_ms logic.
+        const last_activity_ms = @max(slot.line2.last_active_ms, slot.line2.write_start_ms);
+        const idle_expired = now_ms - last_activity_ms >= timeout_ms;
         // write_timeout_ms closes a write that made no completion for too long
         // (client stalled reading the response). slot.line2.write_start_ms is
         // set on write start and cleared on completion; 0 means "not writing".

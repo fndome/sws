@@ -230,6 +230,9 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
             conn.write_headers_len = 0;
             conn.state = .tcp_reading;
             conn.last_active_ms = milliTimestamp(self.io);
+            if (conn.pool_idx != 0xFFFFFFFF) {
+                self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
+            }
             self.submitRead(conn_id, conn) catch |err| {
                 logErr("submitRead failed for tcp fd={d}: {s}", .{ conn.fd, @errorName(err) });
                 self.closeConn(conn_id, conn.fd);

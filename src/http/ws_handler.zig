@@ -432,6 +432,14 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
         }
         conn.write_offset = 0;
         conn.write_headers_len = 0;
+        // A write completed: clear the write timer and refresh activity so the
+        // idle TTL measures from here, not from the stale last frame read.
+        conn.write_start_ms = 0;
+        conn.last_active_ms = milliTimestamp(self.io);
+        if (conn.pool_idx != 0xFFFFFFFF) {
+            self.pool.slots[conn.pool_idx].line2.write_start_ms = 0;
+            self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
+        }
         if (!conn.keep_alive) {
             self.closeConn(conn_id, conn.fd);
             return;

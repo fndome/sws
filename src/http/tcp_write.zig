@@ -162,6 +162,9 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
             conn.write_offset = 0;
             conn.write_headers_len = 0;
             conn.last_active_ms = milliTimestamp(self.io);
+            if (conn.pool_idx != 0xFFFFFFFF) {
+                self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
+            }
             self.submitRead(conn_id, conn) catch |err| {
                 logErr("submitRead failed for keep-alive fd {}: {s}", .{ conn.fd, @errorName(err) });
                 self.closeConn(conn_id, conn.fd);
@@ -336,6 +339,9 @@ fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: 
             conn.write_offset = 0;
             conn.write_headers_len = 0;
             conn.last_active_ms = milliTimestamp(self.io);
+            if (conn.pool_idx != 0xFFFFFFFF) {
+                self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
+            }
             self.submitRead(conn_id, conn) catch |err| {
                 logErr("submitRead failed for keep-alive fd {}: {s}", .{ conn.fd, @errorName(err) });
                 self.closeConn(conn_id, conn.fd);
