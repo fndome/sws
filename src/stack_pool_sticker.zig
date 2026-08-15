@@ -92,6 +92,7 @@ pub fn slotAlloc(pool: anytype, fd: i32, conn_gen_id: *u32, now_ms: i64) struct 
     slot.line2.user_id = 0;
     slot.line2.conn_id = 0;
     slot.line2.active_list_pos = pool.liveAdd(idx);
+    slot.line2.write_start_ms = 0; // clear stale write-timer from previous slot user
     slot.line4.writev_in_flight = 0; // clear stale flag from previous slot user
 
     return .{ .idx = idx, .token = packUserData(gen_id, idx) };
@@ -116,6 +117,7 @@ pub fn ttlScan(
     allocator: Allocator,
     now_ms: i64,
     timeout_ms: i64,
+    write_timeout_ms: i64,
     scan_cursor: *u32,
     window: u32,
     out: *std.ArrayList(u32),
@@ -134,7 +136,18 @@ pub fn ttlScan(
         const hung = slot.line1.state == .processing and
             now_ms - slot.line2.last_active_ms >= timeout_ms * 2;
         if (slot.line1.state == .processing and !hung) continue;
-        if (now_ms - slot.line2.last_active_ms >= timeout_ms) {
+
+        const idle_expired = now_ms - slot.line2.last_active_ms >= timeout_ms;
+        // write_timeout_ms closes a write that made no completion for too long
+        // (client stalled reading the response). slot.line2.write_start_ms is
+        // set on write start and cleared on completion; 0 means "not writing".
+        const writing = slot.line1.state == .writing or
+            slot.line1.state == .ws_writing or
+            slot.line1.state == .tcp_writing;
+        const write_expired = writing and slot.line2.write_start_ms != 0 and
+            now_ms - slot.line2.write_start_ms >= write_timeout_ms;
+
+        if (idle_expired or write_expired) {
             out.append(allocator, idx) catch {};
         }
     }

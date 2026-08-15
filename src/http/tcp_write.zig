@@ -23,6 +23,11 @@ pub fn submitWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
     if (conn.write_offset == 0) {
         conn.write_start_ms = milliTimestamp(self.io);
         conn.write_retries = 0;
+        // Mirror the write start time into the slot so ttlScan can enforce
+        // write_timeout_ms without a per-connection hashmap lookup.
+        if (conn.pool_idx != 0xFFFFFFFF) {
+            self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
+        }
     }
 
     if (build_options.tls_enabled) {
@@ -132,6 +137,9 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
             conn.write_body = null;
         }
         conn.write_start_ms = 0;
+        if (conn.pool_idx != 0xFFFFFFFF) {
+            self.pool.slots[conn.pool_idx].line2.write_start_ms = 0;
+        }
         if (conn.response_buf) |buf| {
             self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
             conn.response_buf = null;
@@ -294,6 +302,9 @@ fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: 
             conn.write_body = null;
         }
         conn.write_start_ms = 0;
+        if (conn.pool_idx != 0xFFFFFFFF) {
+            self.pool.slots[conn.pool_idx].line2.write_start_ms = 0;
+        }
         if (conn.response_buf) |buf| {
             self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
             conn.response_buf = null;

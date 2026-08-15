@@ -303,6 +303,7 @@ pub fn ttlScanTick(self: *AsyncServer) void {
         self.allocator,
         now,
         @intCast(self.cfg.idle_timeout_ms),
+        @intCast(self.cfg.write_timeout_ms),
         &self.ttl_scan_cursor,
         512,
         &self.ttl_scan_out,
