@@ -49,7 +49,7 @@ fn clearPendingHeaderCopy(allocator: std.mem.Allocator, slot: *StackSlot, hw: *H
     const saved: []u8 = @as([*]u8, @ptrFromInt(slot.line3.pending_buffer_ptr))[0..hw.header_len];
     allocator.free(saved);
     slot.line3.pending_buffer_ptr = 0;
-    hw.pending_bid = 0;
+    hw.pending_bid = NO_READ_BUFFER_BID;
     hw.pending_len = 0;
     hw.header_len = 0;
 }
@@ -59,7 +59,7 @@ fn savePendingHeaderCopy(allocator: std.mem.Allocator, slot: *StackSlot, hw: *Ht
     const saved = try allocator.dupe(u8, data);
     // 修改原因：多次 TCP 分片后的 header 不再完整存在于某一个 read buffer，必须保存累计副本。
     slot.line3.pending_buffer_ptr = @intFromPtr(saved.ptr);
-    hw.pending_bid = 0;
+    hw.pending_bid = NO_READ_BUFFER_BID;
     hw.pending_len = @intCast(saved.len);
     hw.header_len = @intCast(saved.len);
 }
@@ -134,7 +134,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
 
     var effective_buf: []const u8 = if (build_options.tls_enabled and tls_decrypted) plaintext_buf[0..plaintext_len] else read_buf[0..nread];
     var effective_nread = if (build_options.tls_enabled and tls_decrypted) plaintext_len else nread;
-    var pending_to_free: u16 = 0;
+    var pending_to_free: u16 = NO_READ_BUFFER_BID;
     var reassembled_header = false;
     var combo: [MAX_REASSEMBLED_HEADER_SIZE]u8 = undefined;
 
@@ -145,11 +145,11 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         // For plaintext path, use io_uring bid as before.
         if (!build_options.tls_enabled or !tls_decrypted or blk: {
             const hw = sticker.httpWork(&self.pool.slots[conn.pool_idx]);
-            break :blk hw.pending_len > 0 and hw.pending_bid == 0 and self.pool.slots[conn.pool_idx].line3.pending_buffer_ptr != 0;
+            break :blk hw.pending_len > 0 and hw.pending_bid == NO_READ_BUFFER_BID and self.pool.slots[conn.pool_idx].line3.pending_buffer_ptr != 0;
         }) {
         const slot = &self.pool.slots[conn.pool_idx];
         const hw = sticker.httpWork(slot);
-        if (hw.pending_len > 0 and (hw.pending_bid != 0 or slot.line3.pending_buffer_ptr != 0)) {
+        if (hw.pending_len > 0 and (hw.pending_bid != NO_READ_BUFFER_BID or slot.line3.pending_buffer_ptr != 0)) {
             const prev_len: usize = @intCast(hw.pending_len);
             var saved_heap: ?[]u8 = null;
             const prev_buf: []const u8 = if (slot.line3.pending_buffer_ptr != 0) blk: {
@@ -171,7 +171,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             effective_nread = copy_prev_len + cur_len;
             reassembled_header = true;
             if (saved_heap) |saved| self.allocator.free(saved);
-            hw.pending_bid = 0;
+            hw.pending_bid = NO_READ_BUFFER_BID;
             hw.pending_len = 0;
         }
     }
@@ -181,7 +181,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         if (conn.read_len > 0 and conn.read_bid != pending_to_free) {
             self.buffer_pool.markReplenish(conn.read_bid);
         }
-        if (pending_to_free != 0) {
+        if (pending_to_free != NO_READ_BUFFER_BID) {
             self.buffer_pool.markReplenish(pending_to_free);
         }
         conn.read_bid = bid;
@@ -232,9 +232,9 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             logErr("submitRead failed during header reassembly: {s}", .{@errorName(err)});
             if (conn.pool_idx != 0xFFFFFFFF) {
                 const hw = sticker.httpWork(&self.pool.slots[conn.pool_idx]);
-                if (hw.pending_bid != 0) {
+                if (hw.pending_bid != NO_READ_BUFFER_BID) {
                     self.buffer_pool.markReplenish(hw.pending_bid);
-                    hw.pending_bid = 0;
+                    hw.pending_bid = NO_READ_BUFFER_BID;
                     hw.pending_len = 0;
                 }
             }
@@ -717,7 +717,7 @@ test "pending header copy preserves reassembled fragments" {
     try savePendingHeaderCopy(std.testing.allocator, &slot, hw, data);
     defer clearPendingHeaderCopy(std.testing.allocator, &slot, hw);
 
-    try std.testing.expectEqual(@as(u16, 0), hw.pending_bid);
+    try std.testing.expectEqual(NO_READ_BUFFER_BID, hw.pending_bid);
     try std.testing.expectEqual(@as(u16, data.len), hw.pending_len);
     try std.testing.expectEqual(@as(u16, data.len), hw.header_len);
     const saved = @as([*]u8, @ptrFromInt(slot.line3.pending_buffer_ptr))[0..data.len];

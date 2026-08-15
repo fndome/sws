@@ -8,6 +8,7 @@ const packUserData = @import("stack_pool.zig").packUserData;
 const unpackGenId = @import("stack_pool.zig").unpackGenId;
 const unpackIdx = @import("stack_pool.zig").unpackIdx;
 const CLOSE_USER_DATA_FLAG = @import("stack_pool.zig").CLOSE_USER_DATA_FLAG;
+const NO_READ_BUFFER_BID = @import("constants.zig").NO_READ_BUFFER_BID;
 const OVERSIZED_THRESHOLD = @import("stack_pool.zig").OVERSIZED_THRESHOLD;
 const SlotWorkspace = @import("stack_pool.zig").SlotWorkspace;
 const HttpWork = @import("stack_pool.zig").HttpWork;
@@ -75,6 +76,9 @@ pub fn slotAlloc(pool: anytype, fd: i32, conn_gen_id: *u32, now_ms: i64) struct 
     // misinterpret that state on its first read and splice stale bytes into the
     // new request. Reset the workspace (but keep the sentinel) on every alloc.
     @memset(&slot.line5.ws.raw, 0);
+    // pending_bid is the "no pending fragment" sentinel; 0 would collide with a
+    // real header fragment landing on buffer id 0.
+    slot.line5.ws.http.pending_bid = NO_READ_BUFFER_BID;
     slot.line1.gen_id = gen_id;
     slot.line1.fd = fd;
     slot.line1.state = .reading;
@@ -411,7 +415,7 @@ test "slotAlloc clears stale workspace from previous connection" {
     // Second connection reuses the same slot; the workspace must be clean.
     const second = slotAlloc(&pool, 43, &gen_id, 200);
     const hw2 = httpWork(&pool.slots[second.idx]);
-    try std.testing.expectEqual(@as(u16, 0), hw2.pending_bid);
+    try std.testing.expectEqual(NO_READ_BUFFER_BID, hw2.pending_bid);
     try std.testing.expectEqual(@as(u16, 0), hw2.pending_len);
     slotFree(&pool, second.idx);
 }

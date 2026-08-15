@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const ConnState = @import("http/connection.zig").ConnState;
+const NO_READ_BUFFER_BID = @import("constants.zig").NO_READ_BUFFER_BID;
 
 /// StackPool: O(1) 连续数组连接池，替代 AutoHashMap。
 /// user_data = (gen_id << 32) | idx，防 FD 复用幽灵事件。
@@ -213,7 +214,7 @@ pub const HttpWork = extern struct {
     /// 修改原因：这里缓存 body 起点，而不是裸 header 结束下标，以兼容 "\r\n\r\n" 与 "\n\n"。
     headers_end: u16 = 0,
     /// 上次短读的 buffer ID（用于跨 TCP 分片的 header 拼包）
-    pending_bid: u16 = 0,
+    pending_bid: u16 = NO_READ_BUFFER_BID,
     /// 上次短读已累积的字节数
     pending_len: u16 = 0,
     _fill: [30]u8 = [_]u8{0} ** 30,
