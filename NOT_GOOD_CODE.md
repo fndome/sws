@@ -79,11 +79,15 @@ opcode 用 `@enumFromInt(N)` 硬编码，只有行尾注释说明。更糟的是
 
 建议统一返回 `error.OutOfMemory`，由最外层决定策略。
 
+> ✅ 已修复：`TinyCache.init` / `Next.init` / `SubmitQueueRegistry.init` 改为返回 `!T` 并传播错误，`AsyncServer.init` 里的 `ttl_scan_out` / `submit_registry` 改为 `try` 提升到局部变量。
+
 ### 2.3 生产代码用 `catch unreachable`
 
 - `src/next/pipe.zig:95,104` —— `read_buf.replaceRange(...) catch unreachable`
 
 `replaceRange` 在 shrink 时理论上可能分配失败，这里假定绝不失败，风险未注释充分。
+
+> ✅ 已修复：`Reader.read` 本就返回 `!usize`，改为 `try ...replaceRange(...)` 直接传播。
 
 ### 2.4 `_ = ... catch {}` / `catch null` 混合忽略
 

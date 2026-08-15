@@ -31,9 +31,9 @@ pub const SubmitQueueRegistry = struct {
     queues: std.ArrayList(*SubmitQueue),
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) SubmitQueueRegistry {
+    pub fn init(allocator: std.mem.Allocator) !SubmitQueueRegistry {
         return .{
-            .queues = std.ArrayList(*SubmitQueue).initCapacity(allocator, 0) catch @panic("OOM"),
+            .queues = try std.ArrayList(*SubmitQueue).initCapacity(allocator, 0),
             .allocator = allocator,
         };
     }

@@ -28,11 +28,11 @@ pub const TinyCache = struct {
     ttl_ms: i64,
     entries: std.ArrayList(PoolEntry),
 
-    pub fn init(allocator: Allocator, ttl_ms: i64) TinyCache {
+    pub fn init(allocator: Allocator, ttl_ms: i64) !TinyCache {
         return TinyCache{
             .allocator = allocator,
             .ttl_ms = ttl_ms,
-            .entries = std.ArrayList(PoolEntry).initCapacity(allocator, MAX_CONNS_PER_HOST) catch @panic("OOM"),
+            .entries = try std.ArrayList(PoolEntry).initCapacity(allocator, MAX_CONNS_PER_HOST),
         };
     }
 
@@ -191,7 +191,7 @@ fn testPipe(stream: *RingSharedClient) Pipe {
 }
 
 test "TinyCache.store keeps stream ownership with caller on PoolFull" {
-    var cache = TinyCache.init(std.testing.allocator, 1000);
+    var cache = try TinyCache.init(std.testing.allocator, 1000);
     defer {
         for (cache.entries.items) |*e| {
             std.testing.allocator.free(e.host);
@@ -217,7 +217,7 @@ test "TinyCache.store keeps stream ownership with caller on PoolFull" {
 }
 
 test "TinyCache.store applies pool limit per host and port" {
-    var cache = TinyCache.init(std.testing.allocator, 1000);
+    var cache = try TinyCache.init(std.testing.allocator, 1000);
     defer {
         for (cache.entries.items) |*e| {
             std.testing.allocator.free(e.host);
@@ -244,7 +244,7 @@ test "TinyCache.store applies pool limit per host and port" {
 }
 
 test "TinyCache.acquire matches host case-insensitively" {
-    var cache = TinyCache.init(std.testing.allocator, 1000);
+    var cache = try TinyCache.init(std.testing.allocator, 1000);
     defer {
         for (cache.entries.items) |*e| {
             std.testing.allocator.free(e.host);

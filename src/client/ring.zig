@@ -64,6 +64,8 @@ pub const RingB = struct {
         dns.* = try DnsResolver.init(allocator, io, ns_ip);
         errdefer dns.deinit();
 
+        const http_cache = try TinyCache.init(allocator, cache_ttl_ms);
+
         var ring_b = RingB{
             .allocator = allocator,
             .ring = ring,
@@ -71,7 +73,7 @@ pub const RingB = struct {
             .rs = undefined,
             .dns = dns,
             .invoke = .{},
-            .http_cache = TinyCache.init(allocator, cache_ttl_ms),
+            .http_cache = http_cache,
             .connecting = std.StringHashMap(u32).init(allocator),
         };
         // Bind rs to RingB's own fields (not the moved-in locals) and register

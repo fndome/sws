@@ -92,7 +92,7 @@ pub const Pipe = struct {
             if (self.pipe.read_buf.items.len > 0) {
                 const n = @min(dest.len, self.pipe.read_buf.items.len);
                 @memcpy(dest[0..n], self.pipe.read_buf.items[0..n]);
-                self.pipe.read_buf.replaceRange(self.pipe.allocator, 0, n, &.{}) catch unreachable;
+                try self.pipe.read_buf.replaceRange(self.pipe.allocator, 0, n, &.{});
                 return n;
             }
             // 无数据 → yield fiber，等 RingSharedClient feed() 唤醒
@@ -101,7 +101,7 @@ pub const Pipe = struct {
             if (self.pipe.read_buf.items.len == 0) return error.Closed;
             const n = @min(dest.len, self.pipe.read_buf.items.len);
             @memcpy(dest[0..n], self.pipe.read_buf.items[0..n]);
-            self.pipe.read_buf.replaceRange(self.pipe.allocator, 0, n, &.{}) catch unreachable;
+            try self.pipe.read_buf.replaceRange(self.pipe.allocator, 0, n, &.{});
             return n;
         }
 

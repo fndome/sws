@@ -294,15 +294,15 @@ pub const Next = struct {
     pool: ?*WorkerPool,
     submit_threads: std.ArrayList(std.Thread),
 
-    pub fn init(alloc: Allocator, stack_size: u32) Next {
-        const q = alloc.create(SubmitQueue) catch @panic("OOM");
+    pub fn init(alloc: Allocator, stack_size: u32) !Next {
+        const q = try alloc.create(SubmitQueue);
         q.* = SubmitQueue.init();
         return .{
             .ringbuffer = q,
             .allocator = alloc,
             .default_stack_size = stack_size,
             .pool = null,
-            .submit_threads = std.ArrayList(std.Thread).initCapacity(alloc, 0) catch @panic("OOM"),
+            .submit_threads = try std.ArrayList(std.Thread).initCapacity(alloc, 0),
         };
     }
 

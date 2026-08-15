@@ -156,7 +156,7 @@ fn appendPreciseMiddleware(allocator: Allocator, precise: *std.StringHashMap(std
 
 /// 注册中间件，在 fiber 中执行。可用 Next.submit() 卸 CPU 重活。
 pub fn use(self: *AsyncServer, pattern: []const u8, middleware: Middleware) !void {
-    ensureNext(self);
+    try ensureNext(self);
 
     if (pattern.len == 0 or (pattern.len == 1 and pattern[0] == '/')) {
         return error.InvalidPattern;
@@ -232,15 +232,15 @@ pub fn useThenRespondImmediately(self: *AsyncServer, pattern: []const u8, middle
     });
 }
 
-pub fn ensureNext(self: *AsyncServer) void {
+pub fn ensureNext(self: *AsyncServer) !void {
     if (self.next != null) return;
     const kb = if (self.cfg.fiber_stack_size_kb == 0) @as(u16, 64) else self.cfg.fiber_stack_size_kb;
-    self.next = Next.init(self.allocator, @as(u32, @intCast(kb)) * 1024);
+    self.next = try Next.init(self.allocator, @as(u32, @intCast(kb)) * 1024);
     self.next.?.setDefault();
 }
 
 pub fn register(self: *AsyncServer, method: []const u8, path: []const u8, handler: Handler) !void {
-    ensureNext(self);
+    try ensureNext(self);
 
     if (std.mem.indexOfScalar(u8, path, ':') != null or std.mem.indexOfScalar(u8, path, '*') != null) {
         const method_dup = try self.allocator.dupe(u8, method);

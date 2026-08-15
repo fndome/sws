@@ -337,6 +337,11 @@ pub const AsyncServer = struct {
         var user_map = std.AutoHashMap(u64, u32).init(allocator);
         errdefer user_map.deinit();
 
+        var submit_registry = try SubmitQueueRegistry.init(allocator);
+        errdefer submit_registry.deinit();
+        var ttl_scan_out = try std.ArrayList(u32).initCapacity(allocator, 512);
+        errdefer ttl_scan_out.deinit(allocator);
+
         var server = Self{
             .allocator = allocator,
             .io = io,
@@ -366,12 +371,12 @@ pub const AsyncServer = struct {
             .cfg = cfg,
             .io_pinned = false,
             .next = null,
-            .submit_registry = SubmitQueueRegistry.init(allocator),
+            .submit_registry = submit_registry,
             .http_ctx_pool = std.heap.MemoryPool(HttpTaskCtx).empty,
             .ws_ctx_pool = std.heap.MemoryPool(WsTaskCtx).empty,
             .shared_fiber_stack = shared_stack,
             .dns_resolver = dns_resolver,
-            .ttl_scan_out = std.ArrayList(u32).initCapacity(allocator, 512) catch @panic("OOM"),
+            .ttl_scan_out = ttl_scan_out,
             .pending_writes = std.ArrayList(u64).empty,
         };
         if (build_options.tls_enabled) {
@@ -512,8 +517,8 @@ pub const AsyncServer = struct {
         return http_routing.useThenRespondImmediately(self, pattern, middleware);
     }
 
-    fn ensureNext(self: *Self) void {
-        http_routing.ensureNext(self);
+    fn ensureNext(self: *Self) !void {
+        try http_routing.ensureNext(self);
     }
 
     fn register(self: *Self, method: []const u8, path: []const u8, handler: Handler) !void {
@@ -704,7 +709,7 @@ pub const AsyncServer = struct {
     }
 
     pub fn initPool4NextSubmit(self: *Self, worker_count: u8) !void {
-        self.ensureNext();
+        try self.ensureNext();
         try self.next.?.initPool4NextSubmit(worker_count);
     }
 
