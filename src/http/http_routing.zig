@@ -16,6 +16,8 @@ const getMethodFromRequest = helpers.getMethodFromRequest;
 const getPathFromRequestWithLimit = helpers.getPathFromRequestWithLimit;
 const logErr = helpers.logErr;
 const ws_upgrade = @import("../ws/upgrade.zig");
+const HTTP_TASK_TAG = @import("../constants.zig").HTTP_TASK_TAG;
+const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 const http_fiber = @import("http_fiber.zig");
 const http_response = @import("http_response.zig");
 const sticker = @import("../stack_pool_sticker.zig");
@@ -288,7 +290,7 @@ pub fn ws(self: *AsyncServer, path: []const u8, handler: WsHandler) !void {
 
 pub fn processBodyRequest(self: *AsyncServer, conn_id: u64, conn: *Connection, body_buf: []u8) void {
     const bid = conn.read_bid;
-    const slot = if (conn.pool_idx != 0xFFFFFFFF) &self.pool.slots[conn.pool_idx] else null;
+    const slot = if (conn.pool_idx != NO_POOL_SLOT) &self.pool.slots[conn.pool_idx] else null;
     var owned_request_data: ?[]u8 = null;
     const effective_buf: []const u8 = blk: {
         if (slot) |s| {
@@ -460,7 +462,7 @@ pub fn processBodyRequest(self: *AsyncServer, conn_id: u64, conn: *Connection, b
         const method_cap: u4 = @intCast(@min(method_str.len, 15));
         const path_cap: u8 = @intCast(@min(path.len, 255));
         t.* = .{
-            .tag = 0x48540001,
+            .tag = HTTP_TASK_TAG,
             .server = self,
             .conn_id = conn_id,
             .read_bid = conn.read_bid,

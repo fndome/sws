@@ -10,6 +10,8 @@ const build_options = @import("build_options");
 
 const MAX_FIXED_FILES = @import("../constants.zig").MAX_FIXED_FILES;
 const ACCEPT_USER_DATA = @import("../constants.zig").ACCEPT_USER_DATA;
+const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
+const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 
 pub fn nextConnId(self: *AsyncServer) u64 {
     const id = self.next_conn_id;
@@ -49,7 +51,7 @@ pub fn onAcceptComplete(self: *AsyncServer, res: i32, user_data: u64) void {
     const conn_id = nextConnId(self);
 
     const alloc = sticker.slotAlloc(&self.pool, conn_fd, &self.conn_gen_id, milliTimestamp(self.io));
-    if (alloc.idx == 0xFFFFFFFF) {
+    if (alloc.idx == NO_POOL_SLOT) {
         const rc = linux.close(conn_fd);
         if (rc != 0) logErr("close conn_fd={d} failed: {d}", .{ conn_fd, rc });
         // Pool full: stall accept but do NOT resubmit here. Resubmitting
@@ -79,19 +81,19 @@ pub fn onAcceptComplete(self: *AsyncServer, res: i32, user_data: u64) void {
             // connections only the first MAX_FIXED_FILES use the fast path;
             // the rest operate correctly with regular fd-based I/O.
         }
-        if (conn.fixed_index != 0xFFFF) {
+        if (conn.fixed_index != NO_FIXED_FILE) {
             if (self.ring.register_files_update(conn.fixed_index, &[_]linux.fd_t{conn_fd})) {
                 // OK — fixed_index was set above
             } else |_| {
                 freeFixedIndex(self, conn.fixed_index);
-                conn.fixed_index = 0xFFFF;
+                conn.fixed_index = NO_FIXED_FILE;
             }
         }
     }
 
     self.connections.put(conn_id, conn) catch {
         sticker.slotFree(&self.pool, pool_idx);
-        if (conn.fixed_index != 0xFFFF) {
+        if (conn.fixed_index != NO_FIXED_FILE) {
             const idx = conn.fixed_index;
             _ = self.ring.register_files_update(idx, &[_]linux.fd_t{-1}) catch {};
             freeFixedIndex(self, idx);

@@ -19,6 +19,8 @@ const build_options = @import("build_options");
 const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
+const WS_TASK_TAG = @import("../constants.zig").WS_TASK_TAG;
+const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 const MAX_WS_ACCUMULATED_FRAME_SIZE: usize = 1024 * 1024;
 
 fn wsFrameInput(allocator: Allocator, conn: *Connection, data: []u8, owned_out: *?[]u8) ![]u8 {
@@ -132,7 +134,7 @@ pub fn tryWsUpgrade(self: *AsyncServer, conn_id: u64, conn: *Connection, path: [
     conn.write_headers_len = len;
     conn.write_offset = 0;
     conn.state = .writing;
-    if (conn.pool_idx != 0xFFFFFFFF) sticker.switchToWs(&self.pool.slots[conn.pool_idx]);
+    if (conn.pool_idx != NO_POOL_SLOT) sticker.switchToWs(&self.pool.slots[conn.pool_idx]);
     self.submitWrite(conn_id, conn) catch {
         self.closeConn(conn_id, conn.fd);
     };
@@ -208,7 +210,7 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
     // Refresh TTL activity timestamp for WebSocket connections.
     // slot.line2.last_active_ms is only set at accept time; without this,
     // WebSocket connections time out after idle_timeout_ms despite being active.
-    if (conn.pool_idx != 0xFFFFFFFF) {
+    if (conn.pool_idx != NO_POOL_SLOT) {
         const now_ws = milliTimestamp(self.io);
         self.pool.slots[conn.pool_idx].line2.last_active_ms = now_ws;
     }
@@ -241,7 +243,7 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
         }
     };
 
-    if (conn.pool_idx != 0xFFFFFFFF) {
+    if (conn.pool_idx != NO_POOL_SLOT) {
         const ww = sticker.wsWork(&self.pool.slots[conn.pool_idx]);
         ww.payload_len = frame.payload.len;
         ww.is_final = frame.fin;
@@ -354,7 +356,7 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
                 return;
             };
             t.* = .{
-                .tag = 0x57530001,
+                .tag = WS_TASK_TAG,
                 .server = self,
                 .conn_id = conn_id,
                 .read_bid = bid,
@@ -411,7 +413,7 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
     if (res <= 0) {
         const conn = self.getConn(conn_id) orelse return;
         // CQE means kernel is done — clear flag for closeConn & retry
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
         }
         self.closeConn(conn_id, conn.fd);
@@ -423,7 +425,7 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
         conn.write_retries = 0;
         // write completed — clear flag before flushWsWriteQueue may call
         // submitWrite again (which checks writev_in_flight)
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
         }
         if (conn.response_buf) |buf| {
@@ -436,7 +438,7 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
         // idle TTL measures from here, not from the stale last frame read.
         conn.write_start_ms = 0;
         conn.last_active_ms = milliTimestamp(self.io);
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             self.pool.slots[conn.pool_idx].line2.write_start_ms = 0;
             self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
         }
@@ -449,20 +451,20 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
         conn.write_retries += 1;
         if (conn.write_retries > maxWriteRetries(conn.write_headers_len)) {
             logErr("ws write retries exceeded for fd {} ({} attempts)", .{ conn.fd, conn.write_retries });
-            if (conn.pool_idx != 0xFFFFFFFF) {
+            if (conn.pool_idx != NO_POOL_SLOT) {
                 self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
             }
             self.closeConn(conn_id, conn.fd);
             return;
         }
         // clear flag so submitWrite retry can set it again
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
         }
         // Partial progress: refresh the timer so write_timeout_ms tracks time
         // since last progress rather than since the write started.
         conn.write_start_ms = milliTimestamp(self.io);
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
         }
         self.submitWrite(conn_id, conn) catch {

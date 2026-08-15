@@ -1,6 +1,9 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
+const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
+const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
+const NO_LIVE_POS = @import("../constants.zig").NO_LIVE_POS;
 const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 
 pub const ConnState = if (build_options.tls_enabled) enum(u8) {
@@ -33,8 +36,8 @@ pub const ConnState = if (build_options.tls_enabled) enum(u8) {
 pub const Connection = struct {
     id: u64,
     fd: i32,
-    /// 0xFFFF = no fixed file registered; fall back to plain fd for I/O.
-    fixed_index: u16 = 0xFFFF,
+    /// NO_FIXED_FILE = no fixed file registered; fall back to plain fd for I/O.
+    fixed_index: u16 = NO_FIXED_FILE,
     state: ConnState = .reading,
     read_bid: u16 = NO_READ_BUFFER_BID,
     read_len: usize = 0,
@@ -60,12 +63,12 @@ pub const Connection = struct {
     /// WebSocket 写等待队列头部指针（单 IO 线程无锁链表）
     ws_write_queue_head: ?*WsWriteQueueNode = null,
     ws_write_queue_tail: ?*WsWriteQueueNode = null,
-    /// StackPool slot index (0xFFFFFFFF = not pooled)
-    pool_idx: u32 = 0xFFFFFFFF,
+    /// StackPool slot index (NO_POOL_SLOT = not pooled)
+    pool_idx: u32 = NO_POOL_SLOT,
     /// Generation ID for ghost-event defense (synced with pool slot)
     gen_id: u32 = 0,
     /// Position in pool.live list (for O(1) swap-remove)
-    active_list_pos: u32 = 0xFFFFFFFF,
+    active_list_pos: u32 = NO_LIVE_POS,
     tls: ?*TlsStream = null,
     tls_write_len: u32 = 0,
     tls_ciphertext: ?[]u8 = null,

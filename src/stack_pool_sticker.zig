@@ -9,6 +9,8 @@ const unpackGenId = @import("stack_pool.zig").unpackGenId;
 const unpackIdx = @import("stack_pool.zig").unpackIdx;
 const CLOSE_USER_DATA_FLAG = @import("stack_pool.zig").CLOSE_USER_DATA_FLAG;
 const NO_READ_BUFFER_BID = @import("constants.zig").NO_READ_BUFFER_BID;
+const WORKSPACE_SENTINEL = @import("constants.zig").WORKSPACE_SENTINEL;
+const NO_POOL_SLOT = @import("constants.zig").NO_POOL_SLOT;
 const OVERSIZED_THRESHOLD = @import("stack_pool.zig").OVERSIZED_THRESHOLD;
 const SlotWorkspace = @import("stack_pool.zig").SlotWorkspace;
 const HttpWork = @import("stack_pool.zig").HttpWork;
@@ -48,7 +50,7 @@ pub fn extractBid(cqe_flags: u32) u16 {
 /// ── Slot 生命周期 ─────────────────────────────────────
 /// 分配并初始化一个槽位。返回 index + user_data token。
 pub fn slotAlloc(pool: anytype, fd: i32, conn_gen_id: *u32, now_ms: i64) struct { idx: u32, token: u64 } {
-    const idx = pool.acquire() orelse return .{ .idx = 0xFFFFFFFF, .token = 0 };
+    const idx = pool.acquire() orelse return .{ .idx = NO_POOL_SLOT, .token = 0 };
     var gen_id = conn_gen_id.*;
     // 修改原因：gen_id=0 会被 getSlotChecked 视为无效，计数器初始化或回绕时必须跳过 0。
     if (gen_id == 0) gen_id = 1;
@@ -64,7 +66,7 @@ pub fn slotAlloc(pool: anytype, fd: i32, conn_gen_id: *u32, now_ms: i64) struct 
 
     const slot = &pool.slots[idx];
     // Debug: verify sentinel intact (catches buffer overflow from previous slot user)
-    std.debug.assert(slot.line5.sentinel == 0x53574153);
+    std.debug.assert(slot.line5.sentinel == WORKSPACE_SENTINEL);
     // Clear cache-line groups that may carry stale pointers from the previous
     // slot user (large_buf_ptr, stream_ptr, write_iovs, ws_write_queue_* etc.).
     // line5 (workspace + sentinel) is preserved — sentinel is verified above.
@@ -256,7 +258,7 @@ pub fn switchToWs(slot: *StackSlot) void {
 
 /// ── 哨兵校验 ──────────────────────────────────────────
 pub fn sentinelIntact(slot: *const StackSlot) bool {
-    return slot.line5.sentinel == 0x53574153;
+    return slot.line5.sentinel == WORKSPACE_SENTINEL;
 }
 
 /// ── 全系统连接管理（封装 pool + hashmap 双查）──────────
@@ -282,7 +284,7 @@ pub fn lookupByConnId(
 ) ?struct { slot: *StackSlot, idx: u32, conn: *anyopaque } {
     const conn = connections.getPtr(conn_id) orelse return null;
     const idx = conn.pool_idx;
-    if (idx == 0xFFFFFFFF) return null;
+    if (idx == NO_POOL_SLOT) return null;
     const slot = &pool.slots[idx];
     return .{ .slot = slot, .idx = idx, .conn = conn };
 }
@@ -298,7 +300,7 @@ pub fn connAlloc(
     conn: anytype,
 ) !u64 {
     const result = slotAlloc(pool, fd, conn_gen_id, now_ms);
-    if (result.idx == 0xFFFFFFFF) return error.PoolFull;
+    if (result.idx == NO_POOL_SLOT) return error.PoolFull;
     errdefer {
         // 修改原因：connections.put 失败时必须归还已加入 live 的 slot，否则连接池容量会永久泄漏。
         slotFree(pool, result.idx);
@@ -320,7 +322,7 @@ pub fn connFree(
     conn_id: u64,
 ) void {
     if (connections.getPtr(conn_id)) |conn| {
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             const slot = &pool.slots[conn.pool_idx];
             // Guard: if slot was reused (gen_id changed), this connection
             // no longer owns it. Only free the slot if gen_id still matches.
@@ -340,7 +342,7 @@ pub fn connFreeAll(
     var it = connections.iterator();
     while (it.next()) |entry| {
         const conn = entry.value_ptr;
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             const slot = &pool.slots[conn.pool_idx];
             // Validate gen_id to prevent double-free when a slot was
             // freed and reallocated but the hashmap entry was never removed.
@@ -396,7 +398,7 @@ test "slotAlloc skips zero generation ids" {
     const allocated = slotAlloc(&pool, 42, &gen_id, 100);
     defer slotFree(&pool, allocated.idx);
 
-    try std.testing.expect(allocated.idx != 0xFFFFFFFF);
+    try std.testing.expect(allocated.idx != NO_POOL_SLOT);
     try std.testing.expectEqual(@as(u32, 1), pool.slots[allocated.idx].line1.gen_id);
     try std.testing.expectEqual(@as(u32, 2), gen_id);
     try std.testing.expect(getSlotChecked(&pool, allocated.token) != null);

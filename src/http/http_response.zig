@@ -5,6 +5,7 @@ const AsyncServer = @import("async_server.zig").AsyncServer;
 const Connection = @import("connection.zig").Connection;
 const Context = @import("context.zig").Context;
 const logErr = @import("http_helpers.zig").logErr;
+const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 
 pub fn statusText(code: u16) []const u8 {
     return switch (code) {
@@ -46,7 +47,7 @@ pub fn headerOnlyCapacity(extra_headers_len: usize) usize {
 pub fn ensureWriteBuf(self: *AsyncServer, conn: *Connection, min_size: usize) bool {
     if (conn.response_buf) |existing| {
         if (existing.len >= min_size) return true;
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             if (self.pool.slots[conn.pool_idx].line4.writev_in_flight != 0) {
                 logErr("ensureWriteBuf: refusing to replace in-flight write buffer for fd={d}", .{conn.fd});
                 return false;

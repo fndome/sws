@@ -3,6 +3,8 @@ const Allocator = std.mem.Allocator;
 
 const ConnState = @import("http/connection.zig").ConnState;
 const NO_READ_BUFFER_BID = @import("constants.zig").NO_READ_BUFFER_BID;
+const WORKSPACE_SENTINEL = @import("constants.zig").WORKSPACE_SENTINEL;
+const NO_LIVE_POS = @import("constants.zig").NO_LIVE_POS;
 
 /// StackPool: O(1) 连续数组连接池，替代 AutoHashMap。
 /// user_data = (gen_id << 32) | idx，防 FD 复用幽灵事件。
@@ -45,7 +47,7 @@ pub fn StackPool(comptime T: type) type {
                 // 修改原因：allocator.alloc 返回未初始化内存，必须写入默认值以初始化 line5.sentinel 等调试/运行元数据。
                 slot.* = std.mem.zeroes(T);
                 if (@hasField(T, "line5")) {
-                    slot.line5.sentinel = 0x53574153;
+                    slot.line5.sentinel = WORKSPACE_SENTINEL;
                 }
                 @atomicStore(u32, &slot.line1.gen_id, 0, .monotonic);
             }
@@ -136,7 +138,7 @@ const CacheLine2 = extern struct {
     write_start_ms: i64 = 0,
     is_writing: bool = false,
     conn_id: u64 = 0,
-    active_list_pos: u32 = 0xFFFFFFFF,
+    active_list_pos: u32 = NO_LIVE_POS,
     /// 连接创建时间戳 (ms)，用于绝对 TTL 硬超时
     birth_ms: i64 = 0,
     _pad: [4]u8 = [_]u8{0} ** 4,
@@ -190,8 +192,8 @@ const CacheLine4_6 = extern struct {
 };
 
 const CacheLine5 = extern struct {
-    /// 哨兵魔数 0x53574153，debug 时检测内存越界
-    sentinel: u32 = 0x53574153,
+    /// 哨兵魔数（WORKSPACE_SENTINEL），debug 时检测内存越界
+    sentinel: u32 = WORKSPACE_SENTINEL,
     /// 二级计算区：协议解析 / Worker Pool 移交 / Fiber 虚拟寄存器
     ws: SlotWorkspace = .{ .raw = [_]u8{0} ** 56 },
 };

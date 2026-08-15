@@ -9,6 +9,8 @@ const packUserData = @import("../stack_pool.zig").packUserData;
 const CLOSE_USER_DATA_FLAG = @import("../stack_pool.zig").CLOSE_USER_DATA_FLAG;
 const ACCEPT_USER_DATA = @import("../constants.zig").ACCEPT_USER_DATA;
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
+const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
+const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 const logErr = @import("http_helpers.zig").logErr;
 
 pub fn getConn(self: *AsyncServer, conn_id: u64) ?*Connection {
@@ -63,7 +65,7 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
 
         self.drainWsWriteQueue(conn);
 
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             const slot = &self.pool.slots[conn.pool_idx];
             if (slot.line3.pending_buffer_ptr != 0) {
                 const hw = sticker.httpWork(slot);
@@ -91,7 +93,7 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
             // freeing now would risk kernel use-after-free on the buffer.
             // onWriteComplete / onWsWriteComplete + the .closing CQE path
             // handle the deferred cleanup.
-            const write_inflight = if (conn.pool_idx != 0xFFFFFFFF)
+            const write_inflight = if (conn.pool_idx != NO_POOL_SLOT)
                 self.pool.slots[conn.pool_idx].line4.writev_in_flight != 0
             else
                 false;
@@ -115,7 +117,7 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
             // re-invokes closeConn. Freeing the slot now would orphan
             // write_body/response_buf — the next CQE sees gen_id=0 and drops
             // them silently, leaking heap + tiered-pool buffers.
-            if (conn.pool_idx != 0xFFFFFFFF and
+            if (conn.pool_idx != NO_POOL_SLOT and
                 self.pool.slots[conn.pool_idx].line4.writev_in_flight != 0)
             {
                 return;
@@ -142,7 +144,7 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
 
     if (self.use_fixed_files) {
         if (getConn(self, conn_id)) |conn| {
-            if (conn.fixed_index == 0xFFFF) {
+            if (conn.fixed_index == NO_FIXED_FILE) {
                 // no fixed file registered; skip deregister
             } else {
                 const idx = conn.fixed_index;

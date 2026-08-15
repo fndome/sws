@@ -5,6 +5,7 @@ const build_options = @import("build_options");
 
 const RingShared = @import("ring_shared.zig").RingShared;
 const DnsResolver = @import("../dns/resolver.zig").DnsResolver;
+const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 const HandshakeStep = if (build_options.tls_enabled) @import("../tls/tls.zig").HandshakeStep else struct {};
 const tls_lib = @import("tls");
@@ -47,7 +48,7 @@ pub const RingSharedClient = struct {
     writing: bool,
 
     dns: ?*DnsResolver,
-    fixed_index: u16 = 0xFFFF,
+    fixed_index: u16 = NO_FIXED_FILE,
     tls: ?*TlsStream = null,
     tls_handshaking: bool = false,
     tls_write_plaintext: u32 = 0,
@@ -274,7 +275,7 @@ pub const RingSharedClient = struct {
         // Track how much plaintext this chunk consumed for offset advancement on CQE
         self.tls_write_plaintext = @intCast(to_encrypt.len);
         // Write ciphertext to socket
-        const use_fixed = self.fixed_index != 0xFFFF;
+        const use_fixed = self.fixed_index != NO_FIXED_FILE;
         const fd_or_idx = if (use_fixed) @as(i32, @intCast(self.fixed_index)) else self.fd;
         const sqe = try self.rs.ringPtr().write(self.id | CLIENT_WRITE_USER_DATA_FLAG, fd_or_idx, ciphertext_buf[0..ciphertext_len], 0);
         if (use_fixed) sqe.flags |= linux.IOSQE_FIXED_FILE;
@@ -299,7 +300,7 @@ pub const RingSharedClient = struct {
             return;
         }
         const to_send = self.write_buf.items[self.write_offset..];
-        const use_fixed = self.fixed_index != 0xFFFF;
+        const use_fixed = self.fixed_index != NO_FIXED_FILE;
         const fd_or_idx = if (use_fixed) @as(i32, @intCast(self.fixed_index)) else self.fd;
         // 修改原因：同一连接上可能同时存在 keep-alive 读 CQE 和新请求写 CQE；
         // 给写操作打标记，完成时才能按真实操作类型分发，而不是靠 self.writing 猜。
@@ -309,7 +310,7 @@ pub const RingSharedClient = struct {
     }
 
     fn submitRead(self: *RingSharedClient) !void {
-        const use_fixed = self.fixed_index != 0xFFFF;
+        const use_fixed = self.fixed_index != NO_FIXED_FILE;
         const fd_or_idx = if (use_fixed) @as(i32, @intCast(self.fixed_index)) else self.fd;
         const sqe = try self.rs.ringPtr().read(self.id, fd_or_idx, .{ .buffer = self.read_buf }, 0);
         if (use_fixed) sqe.flags |= linux.IOSQE_FIXED_FILE;
@@ -401,7 +402,7 @@ pub const RingSharedClient = struct {
                 const one: i32 = 1;
                 _ = linux.setsockopt(self.fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, @ptrCast(&one), @sizeOf(i32));
                 // 修改原因：RingSharedClient 没有 fixed-file 槽位分配器；多个连接共用 slot 0 会互相覆盖 fd。
-                self.fixed_index = 0xFFFF;
+                self.fixed_index = NO_FIXED_FILE;
                 if (self.write_buf.items.len > self.write_offset) {
                     // 修改原因：连接建立前排队的首个请求必须先写出，再等响应；否则新建连接会先挂读或直接丢掉首包。
                     self.flushWrite() catch {
@@ -558,7 +559,7 @@ pub const RingSharedClient = struct {
     fn onClose(self: *RingSharedClient) void {
         if (self.state == .closed) return;
         self.state = .closed;
-        if (self.fixed_index != 0xFFFF) {
+        if (self.fixed_index != NO_FIXED_FILE) {
             _ = self.rs.ringPtr().register_files_update(self.fixed_index, &[_]linux.fd_t{-1}) catch {};
         }
         if (self.fd >= 0) {

@@ -12,6 +12,8 @@ const build_options = @import("build_options");
 const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
+const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
+const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 
 pub fn onTcpAcceptComplete(self: *AsyncServer, res: i32) void {
     self.tcp_accept_outstanding = false;
@@ -26,7 +28,7 @@ pub fn onTcpAcceptComplete(self: *AsyncServer, res: i32) void {
     const conn_fd: i32 = @intCast(res);
 
     const alloc = sticker.slotAlloc(&self.pool, conn_fd, &self.conn_gen_id, milliTimestamp(self.io));
-    if (alloc.idx == 0xFFFFFFFF) {
+    if (alloc.idx == NO_POOL_SLOT) {
         _ = linux.close(conn_fd);
         self.tcp_accept_stalled = true;
         return;
@@ -51,17 +53,17 @@ pub fn onTcpAcceptComplete(self: *AsyncServer, res: i32) void {
         if (self.allocFixedIndex()) |idx| {
             conn.fixed_index = idx;
         } else |_| {}
-        if (conn.fixed_index != 0xFFFF) {
+        if (conn.fixed_index != NO_FIXED_FILE) {
             if (self.ring.register_files_update(conn.fixed_index, &[_]linux.fd_t{conn_fd})) {} else |_| {
                 self.freeFixedIndex(conn.fixed_index);
-                conn.fixed_index = 0xFFFF;
+                conn.fixed_index = NO_FIXED_FILE;
             }
         }
     }
 
     self.connections.put(conn_id, conn) catch {
         sticker.slotFree(&self.pool, pool_idx);
-        if (conn.fixed_index != 0xFFFF) {
+        if (conn.fixed_index != NO_FIXED_FILE) {
             const idx = conn.fixed_index;
             _ = self.ring.register_files_update(idx, &[_]linux.fd_t{-1}) catch {};
             self.freeFixedIndex(idx);
@@ -153,7 +155,7 @@ pub fn onRawData(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
     }
     conn.read_len = effective_nread;
 
-    if (conn.pool_idx != 0xFFFFFFFF) {
+    if (conn.pool_idx != NO_POOL_SLOT) {
         const now_ms = milliTimestamp(self.io);
         self.pool.slots[conn.pool_idx].line2.last_active_ms = now_ms;
     }
@@ -208,7 +210,7 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
     _ = user_data;
     if (res <= 0) {
         const conn = self.getConn(conn_id) orelse return;
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
         }
         self.closeConn(conn_id, conn.fd);
@@ -218,7 +220,7 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
     conn.write_offset += @as(usize, @intCast(res));
     if (conn.write_offset >= conn.write_headers_len) {
         conn.write_retries = 0;
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
         }
         if (conn.response_buf) |buf| {
@@ -230,7 +232,7 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
             conn.write_headers_len = 0;
             conn.state = .tcp_reading;
             conn.last_active_ms = milliTimestamp(self.io);
-            if (conn.pool_idx != 0xFFFFFFFF) {
+            if (conn.pool_idx != NO_POOL_SLOT) {
                 self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
             }
             self.submitRead(conn_id, conn) catch |err| {
@@ -244,24 +246,24 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
         conn.write_retries += 1;
         if (conn.write_retries > @import("http_response.zig").maxWriteRetries(conn.write_headers_len)) {
             logErr("tcp write retries exceeded for fd={d}", .{conn.fd});
-            if (conn.pool_idx != 0xFFFFFFFF) {
+            if (conn.pool_idx != NO_POOL_SLOT) {
                 self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
             }
             self.closeConn(conn_id, conn.fd);
             return;
         }
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
         }
         // Partial progress: refresh the timer so write_timeout_ms tracks time
         // since last progress rather than since the write started.
         conn.write_start_ms = milliTimestamp(self.io);
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
         }
         self.submitWrite(conn_id, conn) catch |err| {
             logErr("submitWrite failed for tcp fd={d}: {s}", .{ conn.fd, @errorName(err) });
-            if (conn.pool_idx != 0xFFFFFFFF) {
+            if (conn.pool_idx != NO_POOL_SLOT) {
                 self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
             }
             self.closeConn(conn_id, conn.fd);

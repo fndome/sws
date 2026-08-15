@@ -16,6 +16,18 @@ pub const READ_BUF_GROUP_ID = 0;
 /// "no buffer" from a read that landed on buffer id 0, which is a valid
 /// provided buffer (provideAllReads starts bids at 0).
 pub const NO_READ_BUFFER_BID: u16 = 0xFFFF;
+/// Slot-workspace overflow sentinel ("SWAS" little-endian). Verified intact on
+/// slot reuse to catch a previous connection overrunning the workspace.
+pub const WORKSPACE_SENTINEL: u32 = 0x53574153;
+/// Task-context type tags ("HT"/"WS" + version 1) asserted on recycle to catch
+/// a task being recycled through the wrong context pool.
+pub const HTTP_TASK_TAG: u32 = 0x48540001;
+pub const WS_TASK_TAG: u32 = 0x57530001;
+/// "No fixed-file registered" sentinel (valid indices are 0..MAX_FIXED_FILES-1).
+pub const NO_FIXED_FILE: u16 = 0xFFFF;
+/// "No pool slot / invalid live-list position" sentinel.
+pub const NO_POOL_SLOT: u32 = 0xFFFFFFFF;
+pub const NO_LIVE_POS: u32 = 0xFFFFFFFF;
 pub const ACCEPT_USER_DATA: u64 = (1 << 63);
 /// Raw-TCP accept marker. Must NOT share a bit with CLIENT_USER_DATA_FLAG
 /// (1<<62) or ACCEPT_USER_DATA (1<<63), otherwise a TCP-accept CQE could be

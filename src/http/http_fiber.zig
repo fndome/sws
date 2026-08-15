@@ -8,6 +8,8 @@ const http_routing = @import("http_routing.zig");
 const logErr = @import("http_helpers.zig").logErr;
 const sticker = @import("../stack_pool_sticker.zig");
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
+const HTTP_TASK_TAG = @import("../constants.zig").HTTP_TASK_TAG;
+const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 
 pub const HttpTaskCtx = struct {
     tag: u32,
@@ -31,7 +33,7 @@ fn responseHeaderItems(headers: ?*const std.ArrayList(u8)) []const u8 {
 
 pub fn httpTaskExec(caller_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []const u8) void) void {
     const t: *HttpTaskCtx = @ptrCast(@alignCast(caller_ctx));
-    std.debug.assert(t.tag == 0x48540001);
+    std.debug.assert(t.tag == HTTP_TASK_TAG);
     const server = t.server;
 
     const method = t.method_buf[0..t.method_len];
@@ -164,7 +166,7 @@ pub fn httpTaskExecWrapperWithOwnership(t: *HttpTaskCtx, complete: *const fn (?*
 }
 
 fn httpTaskRecycle(t: *HttpTaskCtx) void {
-    std.debug.assert(t.tag == 0x48540001);
+    std.debug.assert(t.tag == HTTP_TASK_TAG);
     // Return the read buffer bid to io_uring. If the connection was freed
     // before this task completed (close CQE arrived first), skip connection
     // state updates but still replenish the buffer. markReplenish has internal
@@ -179,7 +181,7 @@ fn httpTaskRecycle(t: *HttpTaskCtx) void {
     if (t.server.connections.getPtr(t.conn_id)) |conn| {
         conn.read_buf_recycled = true;
         conn.read_len = 0;
-        const has_stream = conn.pool_idx != 0xFFFFFFFF and
+        const has_stream = conn.pool_idx != NO_POOL_SLOT and
             sticker.getStream(&t.server.pool.slots[conn.pool_idx]) != null;
         if (conn.state == .streaming or has_stream) {
             if (has_stream) conn.state = .streaming;
@@ -206,7 +208,7 @@ pub fn httpTaskCleanup(t: *HttpTaskCtx) void {
 
 pub fn httpTaskComplete(caller_ctx: ?*anyopaque, _: []const u8) void {
     const t: *HttpTaskCtx = @ptrCast(@alignCast(caller_ctx));
-    std.debug.assert(t.tag == 0x48540001);
+    std.debug.assert(t.tag == HTTP_TASK_TAG);
     t.server.shared_fiber_active = false;
     httpTaskRecycle(t);
     t.server.http_ctx_pool.destroy(t);

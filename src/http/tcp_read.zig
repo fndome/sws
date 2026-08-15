@@ -21,6 +21,9 @@ const HttpWork = @import("../stack_pool.zig").HttpWork;
 const OVERSIZED_THRESHOLD = @import("../stack_pool.zig").OVERSIZED_THRESHOLD;
 const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
+const HTTP_TASK_TAG = @import("../constants.zig").HTTP_TASK_TAG;
+const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
+const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 const TlsStream = @import("../tls/tls.zig").TlsStream;
 const READ_BUF_GROUP_ID = @import("../constants.zig").READ_BUF_GROUP_ID;
 const MAX_BUFFERED_BODY_SIZE: u64 = 1024 * 1024;
@@ -69,11 +72,11 @@ pub fn submitRead(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
     // 修改原因：read_buf_recycled 针对单次 read CQE，重新提交 buffer-selection read 前必须重置。
     prepareReadSubmission(conn);
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
-    const fd = if (conn.fixed_index != 0xFFFF) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
+    const fd = if (conn.fixed_index != NO_FIXED_FILE) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
     const sqe = self.ring.read(user_data, fd, .{
         .buffer_selection = .{ .group_id = READ_BUF_GROUP_ID, .len = BUFFER_SIZE },
     }, 0) catch return error.RingFull;
-    if (conn.fixed_index != 0xFFFF) sqe.flags |= linux.IOSQE_FIXED_FILE;
+    if (conn.fixed_index != NO_FIXED_FILE) sqe.flags |= linux.IOSQE_FIXED_FILE;
 }
 
 pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe_flags: u32) void {
@@ -138,7 +141,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
     var reassembled_header = false;
     var combo: [MAX_REASSEMBLED_HEADER_SIZE]u8 = undefined;
 
-    if (conn.pool_idx != 0xFFFFFFFF) {
+    if (conn.pool_idx != NO_POOL_SLOT) {
         // TLS decrypt reuses plaintext buffer for effective_buf, but if header
         // spans reads, the plaintext is on the stack and will be overwritten.
         // Use heap save (slice to slot.line3.pending_buffer_ptr) for TLS path.
@@ -203,7 +206,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             self.respond(conn, 431, "Request Header Fields Too Large");
             return;
         }
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             const slot = &self.pool.slots[conn.pool_idx];
             const hw = sticker.httpWork(slot);
             if (reassembled_header or (build_options.tls_enabled and tls_decrypted and bid == NO_READ_BUFFER_BID)) {
@@ -230,7 +233,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         conn.read_len = 0;
         self.submitRead(conn_id, conn) catch |err| {
             logErr("submitRead failed during header reassembly: {s}", .{@errorName(err)});
-            if (conn.pool_idx != 0xFFFFFFFF) {
+            if (conn.pool_idx != NO_POOL_SLOT) {
                 const hw = sticker.httpWork(&self.pool.slots[conn.pool_idx]);
                 if (hw.pending_bid != NO_READ_BUFFER_BID) {
                     self.buffer_pool.markReplenish(hw.pending_bid);
@@ -273,7 +276,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
 
     conn.keep_alive = isKeepAliveConnection(effective_buf);
 
-    if (conn.pool_idx != 0xFFFFFFFF) {
+    if (conn.pool_idx != NO_POOL_SLOT) {
         // Refresh activity timestamp for TTL scanner. slot.line2.last_active_ms
         // was only set at slot allocation; without this update, every connection
         // times out after idle_timeout_ms regardless of actual request activity.
@@ -350,7 +353,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
     }
 
     const body_incomplete = brk: {
-        if (conn.pool_idx == 0xFFFFFFFF) break :brk false;
+        if (conn.pool_idx == NO_POOL_SLOT) break :brk false;
         const hw3 = sticker.httpWork(&self.pool.slots[conn.pool_idx]);
         if (hw3.content_length == 0) break :brk false;
         const headers_end = if (hw3.headers_end > 0) hw3.headers_end else effective_nread;
@@ -440,7 +443,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
     }
 
     var request_buf = effective_buf;
-    if (conn.pool_idx != 0xFFFFFFFF) {
+    if (conn.pool_idx != NO_POOL_SLOT) {
         const hw_req = sticker.httpWork(&self.pool.slots[conn.pool_idx]);
         if (completeRequestEnd(effective_nread, hw_req.headers_end, hw_req.content_length)) |request_end| {
             request_buf = effective_buf[0..request_end];
@@ -451,7 +454,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         }
     }
 
-    const path = if (conn.pool_idx != 0xFFFFFFFF) blk: {
+    const path = if (conn.pool_idx != NO_POOL_SLOT) blk: {
         const hw2 = sticker.httpWork(&self.pool.slots[conn.pool_idx]);
         if (hw2.path_len > 0 and hw2.path_offset + hw2.path_len <= request_buf.len)
             break :blk request_buf[hw2.path_offset..][0..hw2.path_len];
@@ -624,7 +627,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         const method_cap: u4 = @intCast(@min(method_str.len, 15));
         const path_cap: u8 = @intCast(@min(path.len, 255));
         t.* = .{
-            .tag = 0x48540001,
+            .tag = HTTP_TASK_TAG,
             .server = self,
             .conn_id = conn_id,
             .read_bid = conn.read_bid,

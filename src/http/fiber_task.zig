@@ -4,6 +4,7 @@ const AsyncServer = @import("async_server.zig").AsyncServer;
 const WsHandler = @import("../ws/server.zig").WsHandler;
 const ws_frame = @import("../ws/frame.zig");
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
+const WS_TASK_TAG = @import("../constants.zig").WS_TASK_TAG;
 
 const Fiber = @import("../next/fiber.zig").Fiber;
 
@@ -20,7 +21,7 @@ pub const WsTaskCtx = struct {
 
 pub fn wsTaskExec(caller_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []const u8) void) void {
     const t: *WsTaskCtx = @ptrCast(@alignCast(caller_ctx));
-    std.debug.assert(t.tag == 0x57530001);
+    std.debug.assert(t.tag == WS_TASK_TAG);
     t.handler(t.conn_id, &t.frame, t.server.ws_server.ctx);
     complete(t, "");
 }
@@ -31,7 +32,7 @@ pub fn wsTaskExecWrapperWithOwnership(t: *WsTaskCtx, complete: *const fn (?*anyo
 }
 
 fn wsTaskRecycle(t: *WsTaskCtx) void {
-    std.debug.assert(t.tag == 0x57530001);
+    std.debug.assert(t.tag == WS_TASK_TAG);
     // Always return the read buffer bid to io_uring. If the connection
     // was freed before this task completed, skip connection state updates
     // but still replenish the buffer. markReplenish has internal duplicate-
@@ -57,7 +58,7 @@ pub fn wsTaskCleanup(t: *WsTaskCtx) void {
 
 pub fn wsTaskComplete(caller_ctx: ?*anyopaque, _: []const u8) void {
     const t: *WsTaskCtx = @ptrCast(@alignCast(caller_ctx));
-    std.debug.assert(t.tag == 0x57530001);
+    std.debug.assert(t.tag == WS_TASK_TAG);
     // isYielded is true only when the handler yielded and was later
     // resumed. In that case onWsFrame skipped the read re-arm; do it now.
     const deferred_read = Fiber.isYielded();

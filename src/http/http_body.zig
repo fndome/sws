@@ -8,6 +8,8 @@ const packUserData = @import("../stack_pool.zig").packUserData;
 const sticker = @import("../stack_pool_sticker.zig");
 const StreamHandle = @import("../next/chunk_stream.zig").StreamHandle;
 const logErr = @import("http_helpers.zig").logErr;
+const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
+const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 
 const BodyReadWindow = struct {
     offset: usize,
@@ -39,15 +41,15 @@ pub fn submitBodyRead(self: *AsyncServer, conn: *Connection, large_buf: []u8, sl
     const window = bodyReadWindow(slot, large_buf.len) orelse return error.InvalidBodyOffset;
     if (window.remaining == 0) return;
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
-    const fd = if (conn.fixed_index != 0xFFFF) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
+    const fd = if (conn.fixed_index != NO_FIXED_FILE) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
     const dest = large_buf[window.offset..][0..window.remaining];
     const sqe = try self.ring.read(user_data, fd, .{ .buffer = dest }, 0);
-    if (conn.fixed_index != 0xFFFF) sqe.flags |= linux.IOSQE_FIXED_FILE;
+    if (conn.fixed_index != NO_FIXED_FILE) sqe.flags |= linux.IOSQE_FIXED_FILE;
 }
 
 pub fn onBodyChunk(self: *AsyncServer, conn_id: u64, res: i32) void {
     const conn = self.getConn(conn_id) orelse return;
-    const slot = if (conn.pool_idx != 0xFFFFFFFF) &self.pool.slots[conn.pool_idx] else {
+    const slot = if (conn.pool_idx != NO_POOL_SLOT) &self.pool.slots[conn.pool_idx] else {
         if (res <= 0) self.closeConn(conn_id, conn.fd);
         return;
     };
@@ -93,7 +95,7 @@ pub fn onBodyChunk(self: *AsyncServer, conn_id: u64, res: i32) void {
     }
 
     if (res <= 0) {
-        if (conn.pool_idx != 0xFFFFFFFF) {
+        if (conn.pool_idx != NO_POOL_SLOT) {
             if (slot.line3.large_buf_ptr != 0) {
                 const buf: []u8 = @as([*]u8, @ptrFromInt(slot.line3.large_buf_ptr))[0..slot.line3.large_buf_len];
                 self.large_pool.release(buf);
@@ -134,7 +136,7 @@ pub fn onBodyChunk(self: *AsyncServer, conn_id: u64, res: i32) void {
 pub fn onStreamRead(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe_flags: u32) void {
     _ = user_data;
     const conn = self.getConn(conn_id) orelse return;
-    const slot = if (conn.pool_idx != 0xFFFFFFFF) &self.pool.slots[conn.pool_idx] else {
+    const slot = if (conn.pool_idx != NO_POOL_SLOT) &self.pool.slots[conn.pool_idx] else {
         self.closeConn(conn_id, conn.fd);
         return;
     };

@@ -436,7 +436,7 @@ pub const AsyncServer = struct {
                 self.drainWsWriteQueue(conn);
                 if (conn.response_buf) |buf| self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
                 // Release large_pool buffer if connection still holds one
-                if (conn.pool_idx != 0xFFFFFFFF) {
+                if (conn.pool_idx != constants.NO_POOL_SLOT) {
                     const slot = &self.pool.slots[conn.pool_idx];
                     if (slot.line3.pending_buffer_ptr != 0) {
                         const hw = sticker.httpWork(slot);
@@ -453,7 +453,7 @@ pub const AsyncServer = struct {
                     }
                 }
                 _ = linux.close(conn.fd);
-                if (conn.pool_idx != 0xFFFFFFFF) {
+                if (conn.pool_idx != constants.NO_POOL_SLOT) {
                     sticker.slotFree(&self.pool, conn.pool_idx);
                 }
             }

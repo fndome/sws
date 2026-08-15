@@ -32,6 +32,8 @@ opcode 用 `@enumFromInt(N)` 硬编码，只有行尾注释说明。更糟的是
 
 这些魔数散落多处、靠 `std.debug.assert` 比对，缺少命名常量与说明（"HT"/"WS" 缩写含义在代码里找不到）。
 
+> ✅ 已修复：新增 `HTTP_TASK_TAG` / `WS_TASK_TAG` / `WORKSPACE_SENTINEL` 命名常量并全局替换。
+
 ### 1.3 语义重复的 `0xFFFF` / `0xFFFFFFFF` 哨兵
 
 同一值在不同字段里含义不同，极易混淆：
@@ -42,6 +44,8 @@ opcode 用 `@enumFromInt(N)` 硬编码，只有行尾注释说明。更糟的是
 - `slotAlloc` 返回 `.idx = 0xFFFFFFFF`（"池满"）
 
 这些哨兵没有各自的命名常量，全文靠 `!= 0xFFFFFFFF` / `!= 0xFFFF` 字面量判断（见第 3 节）。
+
+> ✅ 已修复：新增 `NO_FIXED_FILE` / `NO_POOL_SLOT` / `NO_LIVE_POS` 命名常量并全局替换（`ws/frame.zig` 的 `0xFFFF` 是 WS 帧长度分界，非哨兵，保持原样）。
 
 ### 1.4 散落的硬编码常量
 
