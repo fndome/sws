@@ -137,7 +137,7 @@ pub fn tryWsUpgrade(self: *AsyncServer, conn_id: u64, conn: *Connection, path: [
     conn.write_headers_len = len;
     conn.write_offset = 0;
     conn.state = .writing;
-    if (conn.pool_idx != NO_POOL_SLOT) sticker.switchToWs(&self.pool.slots[conn.pool_idx]);
+    if (self.connSlot(conn)) |slot| sticker.switchToWs(slot);
     self.submitWrite(conn_id, conn) catch {
         self.closeConn(conn_id, conn.fd);
     };
@@ -213,9 +213,9 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
     // Refresh TTL activity timestamp for WebSocket connections.
     // slot.line2.last_active_ms is only set at accept time; without this,
     // WebSocket connections time out after idle_timeout_ms despite being active.
-    if (conn.pool_idx != NO_POOL_SLOT) {
+    if (self.connSlot(conn)) |slot| {
         const now_ws = milliTimestamp(self.io);
-        self.pool.slots[conn.pool_idx].line2.last_active_ms = now_ws;
+        slot.line2.last_active_ms = now_ws;
     }
 
     const frame = ws_frame.parseFrame(frame_input) catch |err| {
@@ -246,8 +246,8 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
         }
     };
 
-    if (conn.pool_idx != NO_POOL_SLOT) {
-        const ww = sticker.wsWork(&self.pool.slots[conn.pool_idx]);
+    if (self.connSlot(conn)) |slot| {
+            const ww = sticker.wsWork(slot);
         ww.payload_len = frame.payload.len;
         ww.is_final = frame.fin;
     }
@@ -416,8 +416,8 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
     if (res <= 0) {
         const conn = self.getConn(conn_id) orelse return;
         // CQE means kernel is done — clear flag for closeConn & retry
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+        if (self.connSlot(conn)) |slot| {
+            slot.line4.writev_in_flight = 0;
         }
         self.closeConn(conn_id, conn.fd);
         return;
@@ -432,8 +432,8 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
             // A write completed: refresh activity so the idle TTL measures from
             // here, not from the stale last frame read.
             conn.last_active_ms = milliTimestamp(self.io);
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
+            if (self.connSlot(conn)) |slot| {
+                slot.line2.last_active_ms = conn.last_active_ms;
             }
             if (!conn.keep_alive) {
                 self.closeConn(conn_id, conn.fd);
@@ -444,14 +444,14 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
         .retry => {
             conn.write_retries += 1;
             // clear flag so submitWrite retry can set it again
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+            if (self.connSlot(conn)) |slot| {
+                slot.line4.writev_in_flight = 0;
             }
             // Partial progress: refresh the timer so write_timeout_ms tracks time
             // since last progress rather than since the write started.
             conn.write_start_ms = milliTimestamp(self.io);
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
+            if (self.connSlot(conn)) |slot| {
+                slot.line2.write_start_ms = conn.write_start_ms;
             }
             self.submitWrite(conn_id, conn) catch {
                 self.closeConn(conn_id, conn.fd);
@@ -459,8 +459,8 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
         },
         .give_up => {
             logErr("ws write retries exceeded for fd {} ({} attempts)", .{ conn.fd, conn.write_retries + 1 });
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+            if (self.connSlot(conn)) |slot| {
+                slot.line4.writev_in_flight = 0;
             }
             self.closeConn(conn_id, conn.fd);
         },

@@ -158,9 +158,9 @@ pub fn onRawData(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
     }
     conn.read_len = effective_nread;
 
-    if (conn.pool_idx != NO_POOL_SLOT) {
+    if (self.connSlot(conn)) |slot| {
         const now_ms = milliTimestamp(self.io);
-        self.pool.slots[conn.pool_idx].line2.last_active_ms = now_ms;
+        slot.line2.last_active_ms = now_ms;
     }
 
     const data = if (conn.accum_buf) |prev| blk: {
@@ -213,8 +213,8 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
     _ = user_data;
     if (res <= 0) {
         const conn = self.getConn(conn_id) orelse return;
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+        if (self.connSlot(conn)) |slot| {
+            slot.line4.writev_in_flight = 0;
         }
         self.closeConn(conn_id, conn.fd);
         return;
@@ -229,8 +229,8 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
                 conn.write_headers_len = 0;
                 conn.state = .tcp_reading;
                 conn.last_active_ms = milliTimestamp(self.io);
-                if (conn.pool_idx != NO_POOL_SLOT) {
-                    self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
+                if (self.connSlot(conn)) |slot| {
+                    slot.line2.last_active_ms = conn.last_active_ms;
                 }
                 self.submitRead(conn_id, conn) catch |err| {
                     logErr("submitRead failed for tcp fd={d}: {s}", .{ conn.fd, @errorName(err) });
@@ -242,27 +242,27 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
         },
         .retry => {
             conn.write_retries += 1;
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+            if (self.connSlot(conn)) |slot| {
+                slot.line4.writev_in_flight = 0;
             }
             // Partial progress: refresh the timer so write_timeout_ms tracks time
             // since last progress rather than since the write started.
             conn.write_start_ms = milliTimestamp(self.io);
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
+            if (self.connSlot(conn)) |slot| {
+                slot.line2.write_start_ms = conn.write_start_ms;
             }
             self.submitWrite(conn_id, conn) catch |err| {
                 logErr("submitWrite failed for tcp fd={d}: {s}", .{ conn.fd, @errorName(err) });
-                if (conn.pool_idx != NO_POOL_SLOT) {
-                    self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+                if (self.connSlot(conn)) |slot| {
+                    slot.line4.writev_in_flight = 0;
                 }
                 self.closeConn(conn_id, conn.fd);
             };
         },
         .give_up => {
             logErr("tcp write retries exceeded for fd={d}", .{conn.fd});
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+            if (self.connSlot(conn)) |slot| {
+                slot.line4.writev_in_flight = 0;
             }
             self.closeConn(conn_id, conn.fd);
         },
