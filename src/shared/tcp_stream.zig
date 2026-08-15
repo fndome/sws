@@ -6,6 +6,7 @@ const build_options = @import("build_options");
 const RingShared = @import("ring_shared.zig").RingShared;
 const DnsResolver = @import("../dns/resolver.zig").DnsResolver;
 const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
+const logErr = @import("../async_logger.zig").logErr;
 const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 const HandshakeStep = if (build_options.tls_enabled) @import("../tls/tls.zig").HandshakeStep else struct {};
 const tls_lib = @import("tls");
@@ -200,7 +201,7 @@ pub const RingSharedClient = struct {
         sqe.off = self._connect_addrlen;
         if (timeout_ms > 0) {
             const tsqe = ring.nop(0) catch {
-                _ = ring.submit() catch {};
+                _ = ring.submit() catch |err| logErr("client connect submit failed: {s}", .{@errorName(err)});
                 return error.ConnectSubmitQueueFull;
             };
             sqe.flags |= linux.IOSQE_IO_LINK; // link LINK_TIMEOUT next
@@ -214,7 +215,7 @@ pub const RingSharedClient = struct {
             tsqe.len = 1;
             // CONNECT + LINK_TIMEOUT submitted together — no orphan window
         }
-        _ = ring.submit() catch {};
+        _ = ring.submit() catch |err| logErr("client connect submit failed: {s}", .{@errorName(err)});
     }
 
     pub fn write(self: *RingSharedClient, data: []const u8) !void {
@@ -560,7 +561,7 @@ pub const RingSharedClient = struct {
         if (self.state == .closed) return;
         self.state = .closed;
         if (self.fixed_index != NO_FIXED_FILE) {
-            _ = self.rs.ringPtr().register_files_update(self.fixed_index, &[_]linux.fd_t{-1}) catch {};
+            _ = self.rs.ringPtr().register_files_update(self.fixed_index, &[_]linux.fd_t{-1}) catch |err| logErr("client register_files_update failed for idx={d}: {s}", .{ self.fixed_index, @errorName(err) });
         }
         if (self.fd >= 0) {
             _ = linux.close(self.fd);

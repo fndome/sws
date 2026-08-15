@@ -159,7 +159,7 @@ pub fn ttlScan(
             now_ms - slot.line2.write_start_ms >= write_timeout_ms;
 
         if (idle_expired or write_expired) {
-            out.append(allocator, idx) catch {};
+            out.append(allocator, idx) catch |err| logErr("ttlScan: append failed: {s}", .{@errorName(err)});
         }
     }
 

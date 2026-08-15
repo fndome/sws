@@ -106,7 +106,7 @@ pub const RingB = struct {
         }
         self.dns.tick();
         self.invoke.drain(self.allocator);
-        _ = self.ring.submit() catch {};
+        _ = self.ring.submit() catch |err| helpers.logErr("RingB: submit failed: {s}", .{@errorName(err)});
 
         var cqes: [MAX_CQES_TICK]linux.io_uring_cqe = undefined;
         const n = self.ring.copy_cqes(&cqes, 0) catch return;

@@ -174,7 +174,7 @@ pub const DnsResolver = struct {
         Fiber.dnsYield(&self.pending.getPtr(txid).?.slot);
 
         const result = self.results.fetchRemove(txid) orelse {
-            self.cache.put(hostname, &.{}, NEGATIVE_TTL_SECS, self.nowMs(), true) catch {};
+            self.cache.put(hostname, &.{}, NEGATIVE_TTL_SECS, self.nowMs(), true) catch |err| logWarn("DnsResolver: cache.put failed: {s}", .{@errorName(err)});
             return error.DnsTimeout;
         };
 
@@ -182,7 +182,7 @@ pub const DnsResolver = struct {
             try self.cache.put(hostname, result.value.addrs[0..result.value.len], result.value.ttl, self.nowMs(), false);
             return result.value.addrs[0];
         }
-        self.cache.put(hostname, &.{}, NEGATIVE_TTL_SECS, self.nowMs(), true) catch {};
+        self.cache.put(hostname, &.{}, NEGATIVE_TTL_SECS, self.nowMs(), true) catch |err| logWarn("DnsResolver: cache.put failed: {s}", .{@errorName(err)});
         return error.DomainNotFound;
     }
 
@@ -210,7 +210,7 @@ pub const DnsResolver = struct {
         sqe.len = self.recv_buf.len;
         sqe.off = 0;
         self.recv_outstanding = true;
-        _ = self.rs.ring.submit() catch {};
+        _ = self.rs.ring.submit() catch |err| logWarn("DnsResolver: recv submit failed: {s}", .{@errorName(err)});
     }
 
     pub fn handleCqe(self: *DnsResolver, res: i32) void {
@@ -278,7 +278,7 @@ pub const DnsResolver = struct {
                     .len = 0,
                     .ttl = 0,
                 };
-                self.results.put(txid, empty_result) catch {};
+                self.results.put(txid, empty_result) catch |err| logWarn("DnsResolver: results.put failed: {s}", .{@errorName(err)});
                 Fiber.dnsResume(&removed.value.slot);
             }
         }

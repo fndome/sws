@@ -149,7 +149,7 @@ pub const UdpServer = struct {
         sqe.off = 0;
         sqe.flags = 0;
         self.recv_outstanding = true;
-        _ = self.rs.ring.submit() catch {};
+        _ = self.rs.ring.submit() catch |err| logErr("udp recv submit failed: {s}", .{@errorName(err)});
     }
 
     fn onRecvCqe(self: *UdpServer, res: i32) void {

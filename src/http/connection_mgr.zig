@@ -148,7 +148,7 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
                 // no fixed file registered; skip deregister
             } else {
                 const idx = conn.fixed_index;
-                _ = self.ring.register_files_update(idx, &[_]linux.fd_t{-1}) catch {};
+                _ = self.ring.register_files_update(idx, &[_]linux.fd_t{-1}) catch |err| logErr("register_files_update failed for idx={d}: {s}", .{ idx, @errorName(err) });
                 self.freeFixedIndex(idx);
             }
         }

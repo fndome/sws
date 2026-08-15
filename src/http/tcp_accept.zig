@@ -95,7 +95,7 @@ pub fn onAcceptComplete(self: *AsyncServer, res: i32, user_data: u64) void {
         sticker.slotFree(&self.pool, pool_idx);
         if (conn.fixed_index != NO_FIXED_FILE) {
             const idx = conn.fixed_index;
-            _ = self.ring.register_files_update(idx, &[_]linux.fd_t{-1}) catch {};
+            _ = self.ring.register_files_update(idx, &[_]linux.fd_t{-1}) catch |err| logErr("register_files_update failed for idx={d}: {s}", .{ idx, @errorName(err) });
             freeFixedIndex(self, idx);
         }
         const rc = linux.close(conn_fd);

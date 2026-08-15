@@ -68,6 +68,9 @@ opcode 用 `@enumFromInt(N)` 硬编码，只有行尾注释说明。更糟的是
 
 部分地方有注释说明「非致命」，但多数没有；`ring.submit() catch {}` 在 SQ 满/失败时会让请求静默挂起。
 
+> ✅ 已修复（高价值站点）：`resolver` 的 cache/results/submit、`ring`/`http_client`/`udp`/`tcp_stream` 的 `ring.submit()`、三处 `register_files_update`、TTL 扫描 `out.append`、`http_client` 的 pipe feed，全部改为 `catch |err| logErr/logWarn(...)`。
+> 保留原样的良性站点：`Thread.yield() catch {}`（自旋锁重试）、c-ares 非阻塞 `poll`、`async_logger` 的 `sched_setaffinity`（日志线程绑核，失败无害），以及 `http_fiber` 的 `ctx.text(500/404, ...) catch {}`（尽力写错误响应，连接已坏时失败可忽略）。
+
 ### 2.2 生产路径用 `@panic("OOM")`
 
 初始化/构造路径对 OOM 直接 panic，而非返回 error 让调用方决定：

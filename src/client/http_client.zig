@@ -8,6 +8,7 @@ const TinyCache = @import("tiny_cache.zig").TinyCache;
 const Pipe = @import("../next/pipe.zig").Pipe;
 const TlsConfig = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsConfig else struct {};
 const Fiber = @import("../next/fiber.zig").Fiber;
+const logErr = @import("../async_logger.zig").logErr;
 
 pub const Response = struct {
     status: u16,
@@ -327,7 +328,7 @@ fn onData(stream: *RingSharedClient, ctx: ?*anyopaque, data: []u8) void {
     if (ctx) |ptr| {
         const cache: *TinyCache = @ptrCast(@alignCast(ptr));
         // 修改原因：多个 fiber 可交错等待回包，必须按 stream 查 Pipe，不能使用全局 active_pipe。
-        if (cache.pipeForStream(stream)) |p| p.feed(data) catch {};
+        if (cache.pipeForStream(stream)) |p| p.feed(data) catch |err| logErr("client pipe feed failed: {s}", .{@errorName(err)});
     }
 }
 
@@ -446,7 +447,7 @@ pub const HttpClient = struct {
         while (!@atomicLoad(bool, &self.stop, .acquire)) {
             self.ring_b.tick();
             self.ring_b.invoke.drain(self.allocator);
-            _ = self.ring_b.ring.submit() catch {};
+            _ = self.ring_b.ring.submit() catch |err| logErr("client ring submit failed: {s}", .{@errorName(err)});
             _ = self.ring_b.ring.submit_and_wait(1) catch continue;
         }
         self.ring_b.invoke.drain(self.allocator);
