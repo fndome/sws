@@ -450,6 +450,12 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
         if (conn.pool_idx != 0xFFFFFFFF) {
             self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
         }
+        // Partial progress: refresh the timer so write_timeout_ms tracks time
+        // since last progress rather than since the write started.
+        conn.write_start_ms = milliTimestamp(self.io);
+        if (conn.pool_idx != 0xFFFFFFFF) {
+            self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
+        }
         self.submitWrite(conn_id, conn) catch {
             self.closeConn(conn_id, conn.fd);
         };

@@ -182,6 +182,13 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
         if (conn.pool_idx != 0xFFFFFFFF) {
             self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
         }
+        // A partial write CQE means the client is still reading; refresh the
+        // timer so write_timeout_ms measures time since last progress, not
+        // since the write began (otherwise slow large responses are killed).
+        conn.write_start_ms = milliTimestamp(self.io);
+        if (conn.pool_idx != 0xFFFFFFFF) {
+            self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
+        }
         self.submitWrite(conn_id, conn) catch |err| {
             logErr("submitWrite failed for fd {}: {s}", .{ conn.fd, @errorName(err) });
             if (conn.pool_idx != 0xFFFFFFFF) {
@@ -340,6 +347,12 @@ fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: 
         // More plaintext to encrypt, submit next chunk
         if (conn.pool_idx != 0xFFFFFFFF) {
             self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+        }
+        // Partial progress: refresh the timer so write_timeout_ms tracks time
+        // since last progress rather than since the write started.
+        conn.write_start_ms = milliTimestamp(self.io);
+        if (conn.pool_idx != 0xFFFFFFFF) {
+            self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
         }
         self.submitWrite(conn_id, conn) catch |err| {
             logErr("submitWrite failed for TLS chunk fd {}: {s}", .{ conn.fd, @errorName(err) });
