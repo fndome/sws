@@ -304,8 +304,14 @@ pub fn connFreeAll(
 ) void {
     var it = connections.iterator();
     while (it.next()) |entry| {
-        if (entry.value_ptr.pool_idx != 0xFFFFFFFF) {
-            slotFree(pool, entry.value_ptr.pool_idx);
+        const conn = entry.value_ptr;
+        if (conn.pool_idx != 0xFFFFFFFF) {
+            const slot = &pool.slots[conn.pool_idx];
+            // Validate gen_id to prevent double-free when a slot was
+            // freed and reallocated but the hashmap entry was never removed.
+            if (slot.line1.gen_id == conn.gen_id) {
+                slotFree(pool, conn.pool_idx);
+            }
         }
     }
 }
