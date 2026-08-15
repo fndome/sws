@@ -597,16 +597,17 @@ supported for GPU compute (kernel driver gap).
 
 ### RingShared
 
-`RingShared` is the materialization of a single io_uring ring + single thread — injected into server and any outbound client, all equal.
+`RingShared` is the materialization of a single io_uring ring — injected into server and any outbound client, all equal. The ring is driven by one thread per owner (server `run()`, client `runClientThread`), but SQEs may also be submitted from setup threads (e.g. `cs.connect()` in `main()`), so there is no single-thread assertion.
 
 ```zig
-const rs = server.rs;  // { ring, registry, invoke, io_tid }
+const rs = server.rs;  // { ring, registry, invoke }
 // Any client is injected equally:
 var client = try RingSharedClient.init(alloc, rs, ...);
 var http   = try HttpClient.init(alloc, ring_b, cache);
 ```
 
-- `rs.ringPtr()` / `rs.registryPtr()` — IO-thread assertion guard (non-IO thread access → @panic)
+- `rs.ringPtr()` / `rs.registryPtr()` — plain accessors (the ring is shared across
+  submit/drive threads; no single-thread assertion)
 - `rs.invoke.push()` — any-thread-safe CAS callback (worker → IO thread)
 
 ### RingSharedClient

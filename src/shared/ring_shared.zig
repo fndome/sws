@@ -9,52 +9,35 @@ pub const RingShared = struct {
     ring: *linux.IoUring,
     registry: *IORegistry,
     invoke: InvokeQueue,
-    io_tid: std.Thread.Id,
 
     pub fn bind(ring: *linux.IoUring, registry: *IORegistry) RingShared {
         return .{
             .ring = ring,
             .registry = registry,
             .invoke = .{},
-            .io_tid = std.Thread.getCurrentId(),
         };
     }
 
     /// Re-point ring/registry after the owning struct has moved to its final
     /// address (e.g. AsyncServer/RingB are returned by value, so a bind() done
     /// inside init stores pointers to the init frame). Preserves invoke (which
-    /// may already hold cross-thread items) and io_tid (register/remove happen
-    /// on the bind thread).
+    /// may already hold cross-thread items).
     pub fn rebind(self: *RingShared, ring: *linux.IoUring, registry: *IORegistry) void {
         self.ring = ring;
         self.registry = registry;
     }
 
-    /// bind() captures the init thread, but the ring is usually driven on a
-    /// different thread (e.g. HttpClient.start() spawns a dedicated ring
-    /// thread). Re-capture the actual driving thread there so ringPtr()'s
-    /// single-thread assertion is correct.
-    pub fn setIoThread(self: *RingShared) void {
-        self.io_tid = std.Thread.getCurrentId();
-    }
-
-    /// 获取 ring（仅在 IO 线程合法）。Debug 下 worker 线程调用直接 panic。
+    /// 获取 ring。ring 未开启 SINGLE_ISSUER，可跨线程 submit（server 的
+    /// connect 在 main、run 在 IO 线程；RingB 的 init 在 setup、驱动在 client
+    /// 线程），因此这里不做单线程断言。
     pub fn ringPtr(self: *const RingShared) *linux.IoUring {
-        self.assertIoThread();
         return self.ring;
     }
 
-    /// 获取 registry。无线程断言：registry 的 register/remove 合法地在
-    /// init/deinit（setup）线程与 IO 线程之间先后发生（init 在 start 前、
-    /// deinit 在 join 后），并非并发，逐线程断言会误报。
+    /// 获取 registry。register/remove 合法地在 init/deinit（setup）线程与
+    /// IO 线程之间先后发生（init 在 start 前、deinit 在 join 后），并非并发。
     pub fn registryPtr(self: *const RingShared) *IORegistry {
         return self.registry;
-    }
-
-    pub fn assertIoThread(self: *const RingShared) void {
-        if (std.Thread.getCurrentId() != self.io_tid) {
-            @panic("RingShared accessed from non-IO thread");
-        }
     }
 
     pub fn allocUserData(self: *const RingShared) u64 {
