@@ -15,6 +15,21 @@ const struct_hostent = extern struct {
     h_addr_list: [*:0][*:0]u8,
 };
 
+const fd_set = extern struct {
+    fds_bits: [32]u32 align(8),
+};
+const FD_SET_WORD_BITS: usize = 32;
+const FD_SET_CAPACITY: usize = 32 * FD_SET_WORD_BITS;
+
+fn fdSetHas(set: *const fd_set, fd: i32) bool {
+    if (fd < 0) return false;
+    const fd_index: usize = @intCast(fd);
+    if (fd_index >= FD_SET_CAPACITY) return false;
+    const word = fd_index / FD_SET_WORD_BITS;
+    const bit: u5 = @intCast(fd_index % FD_SET_WORD_BITS);
+    return (set.fds_bits[word] & (@as(u32, 1) << bit)) != 0;
+}
+
 const ARES_SUCCESS: i32 = 0;
 const AF_INET: i32 = 2;
 
@@ -22,6 +37,7 @@ extern fn ares_init(channel: *?*anyopaque) i32;
 extern fn ares_destroy(channel: ?*anyopaque) void;
 extern fn ares_gethostbyname(channel: ?*anyopaque, name: [*:0]const u8, family: i32, callback: ?*anyopaque, arg: ?*anyopaque) void;
 extern fn ares_process_fd(channel: ?*anyopaque, read_fd: i32, write_fd: i32) void;
+extern fn ares_fds(channel: ?*anyopaque, read_fds: *fd_set, write_fds: *fd_set) i32;
 extern fn ares_strerror(status: i32) [*:0]const u8;
 
 /// c-ares async DNS adapter.
@@ -89,7 +105,44 @@ pub const CaresDns = struct {
     /// Pump c-ares and wake the fiber suspended in resolve() once the query
     /// completes. Must be called periodically from the event loop.
     pub fn tick(self: *CaresDns) void {
+        var read_fds: fd_set = undefined;
+        var write_fds: fd_set = undefined;
+        @memset(@as([*]u8, @ptrCast(&read_fds))[0..@sizeOf(fd_set)], 0);
+        @memset(@as([*]u8, @ptrCast(&write_fds))[0..@sizeOf(fd_set)], 0);
+
+        const nfds = ares_fds(self.channel, &read_fds, &write_fds);
+
+        // ares_process_fd(-1, -1) only drains timeouts; it never reads socket
+        // data, so without polling the real fds the DNS response would never
+        // be consumed and every query would end in ARES_ETIMEOUT. Poll the
+        // c-ares sockets non-blockingly and hand ready fds to c-ares.
+        var pfd: [FD_SET_CAPACITY]std.posix.pollfd = undefined;
+        var npfd: usize = 0;
+        var fd: i32 = 0;
+        const fd_limit: i32 = @min(nfds, @as(i32, @intCast(FD_SET_CAPACITY)));
+        while (fd < fd_limit and npfd < pfd.len) : (fd += 1) {
+            const read_set = fdSetHas(&read_fds, fd);
+            const write_set = fdSetHas(&write_fds, fd);
+            if (!read_set and !write_set) continue;
+            var events: i16 = 0;
+            if (read_set) events |= std.posix.POLL.IN;
+            if (write_set) events |= std.posix.POLL.OUT;
+            pfd[npfd] = .{ .fd = fd, .events = events, .revents = 0 };
+            npfd += 1;
+        }
+        if (npfd > 0) {
+            _ = std.posix.poll(pfd[0..npfd], 0) catch {};
+            for (pfd[0..npfd]) |p| {
+                const rfd: i32 = if ((p.revents & std.posix.POLL.IN) != 0) p.fd else -1;
+                const wfd: i32 = if ((p.revents & std.posix.POLL.OUT) != 0) p.fd else -1;
+                if (rfd >= 0 or wfd >= 0) {
+                    ares_process_fd(self.channel, rfd, wfd);
+                }
+            }
+        }
+        // Drain pending timeouts regardless of socket readiness.
         ares_process_fd(self.channel, -1, -1);
+
         if (self.waiting and self.query_done) {
             self.waiting = false;
             Fiber.dnsResume(&self.slot);
