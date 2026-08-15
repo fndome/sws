@@ -35,7 +35,11 @@ fn wsTaskRecycle(t: *WsTaskCtx) void {
     // was freed before this task completed, skip connection state updates
     // but still replenish the buffer. markReplenish has internal duplicate-
     // bid detection for safety.
-    t.server.buffer_pool.markReplenish(t.read_bid);
+    // read_bid == 0 is the "no buffer" sentinel set by the TLS decrypted path;
+    // replenishing it would re-provide slab buffer 0 while it may be in flight.
+    if (t.read_bid != 0) {
+        t.server.buffer_pool.markReplenish(t.read_bid);
+    }
     if (t.server.connections.getPtr(t.conn_id)) |conn| {
         conn.read_buf_recycled = true;
         conn.read_len = 0;
