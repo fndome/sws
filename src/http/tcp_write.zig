@@ -12,7 +12,6 @@ const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 
 const write_progress = @import("write_progress.zig");
-const maxWriteRetries = write_progress.maxWriteRetries;
 
 fn queuePendingWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
     self.pending_writes.append(self.allocator, conn_id) catch {
@@ -130,78 +129,80 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
     }
     const total = write_progress.writeTotal(conn.write_headers_len, if (conn.write_body) |b| b.len else 0);
     conn.write_offset = write_progress.advanceOffset(conn.write_offset, @as(usize, @intCast(res)), total);
-    if (conn.write_offset >= total) {
-        conn.write_retries = 0;
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
-        }
-        if (conn.write_body) |b| {
-            self.allocator.free(b);
-            conn.write_body = null;
-        }
-        conn.write_start_ms = 0;
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line2.write_start_ms = 0;
-        }
-        if (conn.response_buf) |buf| {
-            self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
-            conn.response_buf = null;
-        }
-        if (self.ws_server.getActive(conn_id) != null) {
-            // 修改原因：WebSocket 101 升级完成后 keep_alive 在 tryWsUpgrade 被设为 false，
-            // 若不重置为 true，onWsWriteComplete 的 keep_alive 检查会把后续 pong/应用帧写入后断连。
-            conn.keep_alive = true;
-            conn.write_offset = 0;
-            conn.write_headers_len = 0;
-            conn.state = .ws_reading;
-            self.submitRead(conn_id, conn) catch |err| {
-                logErr("submitRead failed for WS upgrade fd {}: {s}", .{ conn.fd, @errorName(err) });
-                self.closeConn(conn_id, conn.fd);
-            };
-        } else if (conn.keep_alive) {
+    switch (write_progress.classify(conn.write_offset, total, conn.write_retries)) {
+        .complete => {
+            conn.write_retries = 0;
+            if (conn.pool_idx != NO_POOL_SLOT) {
+                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+            }
+            if (conn.write_body) |b| {
+                self.allocator.free(b);
+                conn.write_body = null;
+            }
             conn.write_start_ms = 0;
-            conn.state = .reading;
-            conn.read_len = 0;
-            conn.write_offset = 0;
-            conn.write_headers_len = 0;
-            conn.last_active_ms = milliTimestamp(self.io);
             if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
+                self.pool.slots[conn.pool_idx].line2.write_start_ms = 0;
             }
-            self.submitRead(conn_id, conn) catch |err| {
-                logErr("submitRead failed for keep-alive fd {}: {s}", .{ conn.fd, @errorName(err) });
+            if (conn.response_buf) |buf| {
+                self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
+                conn.response_buf = null;
+            }
+            if (self.ws_server.getActive(conn_id) != null) {
+                // 修改原因：WebSocket 101 升级完成后 keep_alive 在 tryWsUpgrade 被设为 false，
+                // 若不重置为 true，onWsWriteComplete 的 keep_alive 检查会把后续 pong/应用帧写入后断连。
+                conn.keep_alive = true;
+                conn.write_offset = 0;
+                conn.write_headers_len = 0;
+                conn.state = .ws_reading;
+                self.submitRead(conn_id, conn) catch |err| {
+                    logErr("submitRead failed for WS upgrade fd {}: {s}", .{ conn.fd, @errorName(err) });
+                    self.closeConn(conn_id, conn.fd);
+                };
+            } else if (conn.keep_alive) {
+                conn.write_start_ms = 0;
+                conn.state = .reading;
+                conn.read_len = 0;
+                conn.write_offset = 0;
+                conn.write_headers_len = 0;
+                conn.last_active_ms = milliTimestamp(self.io);
+                if (conn.pool_idx != NO_POOL_SLOT) {
+                    self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
+                }
+                self.submitRead(conn_id, conn) catch |err| {
+                    logErr("submitRead failed for keep-alive fd {}: {s}", .{ conn.fd, @errorName(err) });
+                    self.closeConn(conn_id, conn.fd);
+                };
+            } else {
+                self.closeConn(conn_id, conn.fd);
+            }
+        },
+        .retry => {
+            conn.write_retries += 1;
+            if (conn.pool_idx != NO_POOL_SLOT) {
+                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+            }
+            // A partial write CQE means the client is still reading; refresh the
+            // timer so write_timeout_ms measures time since last progress, not
+            // since the write began (otherwise slow large responses are killed).
+            conn.write_start_ms = milliTimestamp(self.io);
+            if (conn.pool_idx != NO_POOL_SLOT) {
+                self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
+            }
+            self.submitWrite(conn_id, conn) catch |err| {
+                logErr("submitWrite failed for fd {}: {s}", .{ conn.fd, @errorName(err) });
+                if (conn.pool_idx != NO_POOL_SLOT) {
+                    self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+                }
                 self.closeConn(conn_id, conn.fd);
             };
-        } else {
-            self.closeConn(conn_id, conn.fd);
-        }
-    } else {
-        conn.write_retries += 1;
-        if (conn.write_retries > maxWriteRetries(total)) {
-            logErr("write retries exceeded for fd {} ({} attempts, {} bytes total)", .{ conn.fd, conn.write_retries, total });
+        },
+        .give_up => {
+            logErr("write retries exceeded for fd {} ({} attempts, {} bytes total)", .{ conn.fd, conn.write_retries + 1, total });
             if (conn.pool_idx != NO_POOL_SLOT) {
                 self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
             }
             self.closeConn(conn_id, conn.fd);
-            return;
-        }
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
-        }
-        // A partial write CQE means the client is still reading; refresh the
-        // timer so write_timeout_ms measures time since last progress, not
-        // since the write began (otherwise slow large responses are killed).
-        conn.write_start_ms = milliTimestamp(self.io);
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
-        }
-        self.submitWrite(conn_id, conn) catch |err| {
-            logErr("submitWrite failed for fd {}: {s}", .{ conn.fd, @errorName(err) });
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
-            }
-            self.closeConn(conn_id, conn.fd);
-        };
+        },
     }
 }
 

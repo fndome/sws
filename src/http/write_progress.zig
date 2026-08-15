@@ -34,6 +34,18 @@ pub fn tlsChunkAdvance(total: usize, offset: usize) usize {
     return @min(remaining, @as(usize, 16384));
 }
 
+/// Action after a write CQE advanced `offset` toward `total`.
+pub const WriteOutcome = enum { complete, retry, give_up };
+
+/// Decide the next action. `retries` is the current count BEFORE incrementing;
+/// a retry is allowed while `retries < maxWriteRetries(total)`. Matches the
+/// original `offset >= total ? complete : (retries+1 > max ? give_up : retry)`.
+pub fn classify(offset: usize, total: usize, retries: u8) WriteOutcome {
+    if (offset >= total) return .complete;
+    if (retries >= maxWriteRetries(total)) return .give_up;
+    return .retry;
+}
+
 test "maxWriteRetries small responses" {
     try std.testing.expectEqual(@as(u8, 3), maxWriteRetries(0));
     try std.testing.expectEqual(@as(u8, 3), maxWriteRetries(1460));
@@ -67,4 +79,20 @@ test "tlsChunkAdvance caps at 16KiB and clamps to remaining" {
     try std.testing.expectEqual(@as(usize, 5000), tlsChunkAdvance(20000, 15000));
     try std.testing.expectEqual(@as(usize, 0), tlsChunkAdvance(20000, 20000));
     try std.testing.expectEqual(@as(usize, 0), tlsChunkAdvance(100, 200));
+}
+
+test "classify complete wins regardless of retries" {
+    try std.testing.expectEqual(WriteOutcome.complete, classify(100, 100, 255));
+    try std.testing.expectEqual(WriteOutcome.complete, classify(200, 100, 0));
+}
+
+test "classify small response retry budget" {
+    try std.testing.expectEqual(WriteOutcome.retry, classify(0, 1460, 0));
+    try std.testing.expectEqual(WriteOutcome.retry, classify(0, 1460, 2));
+    try std.testing.expectEqual(WriteOutcome.give_up, classify(0, 1460, 3));
+}
+
+test "classify large response retry budget" {
+    try std.testing.expectEqual(WriteOutcome.retry, classify(0, 5 * 4096, 4));
+    try std.testing.expectEqual(WriteOutcome.give_up, classify(0, 5 * 4096, 5));
 }
