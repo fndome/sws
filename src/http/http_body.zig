@@ -8,7 +8,6 @@ const packUserData = @import("../stack_pool.zig").packUserData;
 const sticker = @import("../stack_pool_sticker.zig");
 const StreamHandle = @import("../next/chunk_stream.zig").StreamHandle;
 const logErr = @import("http_helpers.zig").logErr;
-const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 
 const BodyReadWindow = struct {
@@ -49,7 +48,7 @@ pub fn submitBodyRead(self: *AsyncServer, conn: *Connection, large_buf: []u8, sl
 
 pub fn onBodyChunk(self: *AsyncServer, conn_id: u64, res: i32) void {
     const conn = self.getConn(conn_id) orelse return;
-    const slot = if (conn.pool_idx != NO_POOL_SLOT) &self.pool.slots[conn.pool_idx] else {
+    const slot = self.connSlot(conn) orelse {
         if (res <= 0) self.closeConn(conn_id, conn.fd);
         return;
     };
@@ -95,12 +94,10 @@ pub fn onBodyChunk(self: *AsyncServer, conn_id: u64, res: i32) void {
     }
 
     if (res <= 0) {
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            if (slot.line3.large_buf_ptr != 0) {
-                const buf: []u8 = @as([*]u8, @ptrFromInt(slot.line3.large_buf_ptr))[0..slot.line3.large_buf_len];
-                self.large_pool.release(buf);
-                slot.line3.large_buf_ptr = 0;
-            }
+        if (slot.line3.large_buf_ptr != 0) {
+            const buf: []u8 = @as([*]u8, @ptrFromInt(slot.line3.large_buf_ptr))[0..slot.line3.large_buf_len];
+            self.large_pool.release(buf);
+            slot.line3.large_buf_ptr = 0;
         }
         self.closeConn(conn_id, conn.fd);
         return;
@@ -136,7 +133,7 @@ pub fn onBodyChunk(self: *AsyncServer, conn_id: u64, res: i32) void {
 pub fn onStreamRead(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe_flags: u32) void {
     _ = user_data;
     const conn = self.getConn(conn_id) orelse return;
-    const slot = if (conn.pool_idx != NO_POOL_SLOT) &self.pool.slots[conn.pool_idx] else {
+    const slot = self.connSlot(conn) orelse {
         self.closeConn(conn_id, conn.fd);
         return;
     };

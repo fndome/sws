@@ -17,7 +17,6 @@ const getPathFromRequestWithLimit = helpers.getPathFromRequestWithLimit;
 const logErr = helpers.logErr;
 const ws_upgrade = @import("../ws/upgrade.zig");
 const HTTP_TASK_TAG = @import("../constants.zig").HTTP_TASK_TAG;
-const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 const http_fiber = @import("http_fiber.zig");
 const http_response = @import("http_response.zig");
 const sticker = @import("../stack_pool_sticker.zig");
@@ -290,7 +289,7 @@ pub fn ws(self: *AsyncServer, path: []const u8, handler: WsHandler) !void {
 
 pub fn processBodyRequest(self: *AsyncServer, conn_id: u64, conn: *Connection, body_buf: []u8) void {
     const bid = conn.read_bid;
-    const slot = if (conn.pool_idx != NO_POOL_SLOT) &self.pool.slots[conn.pool_idx] else null;
+    const slot = self.connSlot(conn);
     var owned_request_data: ?[]u8 = null;
     const effective_buf: []const u8 = blk: {
         if (slot) |s| {

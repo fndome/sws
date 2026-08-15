@@ -8,7 +8,6 @@ const logErr = @import("http_helpers.zig").logErr;
 const milliTimestamp = @import("event_loop.zig").milliTimestamp;
 const TlsStream = @import("../tls/tls.zig").TlsStream;
 const build_options = @import("build_options");
-const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 
 const write_progress = @import("write_progress.zig");

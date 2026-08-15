@@ -9,7 +9,6 @@ const logErr = @import("http_helpers.zig").logErr;
 const sticker = @import("../stack_pool_sticker.zig");
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 const HTTP_TASK_TAG = @import("../constants.zig").HTTP_TASK_TAG;
-const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 
 pub const HttpTaskCtx = struct {
     tag: u32,
@@ -181,8 +180,10 @@ fn httpTaskRecycle(t: *HttpTaskCtx) void {
     if (t.server.connections.getPtr(t.conn_id)) |conn| {
         conn.read_buf_recycled = true;
         conn.read_len = 0;
-        const has_stream = conn.pool_idx != NO_POOL_SLOT and
-            sticker.getStream(&t.server.pool.slots[conn.pool_idx]) != null;
+        const has_stream = if (t.server.connSlot(conn)) |slot|
+            sticker.getStream(slot) != null
+        else
+            false;
         if (conn.state == .streaming or has_stream) {
             if (has_stream) conn.state = .streaming;
             t.server.submitRead(t.conn_id, conn) catch {

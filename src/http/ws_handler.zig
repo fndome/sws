@@ -20,7 +20,6 @@ const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsSt
 const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 const WS_TASK_TAG = @import("../constants.zig").WS_TASK_TAG;
-const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 const write_progress = @import("write_progress.zig");
 const advanceOffset = write_progress.advanceOffset;
 const finishWriteCleanup = @import("tcp_write.zig").finishWriteCleanup;

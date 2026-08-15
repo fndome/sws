@@ -441,8 +441,7 @@ pub const AsyncServer = struct {
                 self.drainWsWriteQueue(conn);
                 if (conn.response_buf) |buf| self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
                 // Release large_pool buffer if connection still holds one
-                if (conn.pool_idx != constants.NO_POOL_SLOT) {
-                    const slot = &self.pool.slots[conn.pool_idx];
+                if (self.connSlot(conn)) |slot| {
                     if (slot.line3.pending_buffer_ptr != 0) {
                         const hw = sticker.httpWork(slot);
                         const saved: []u8 = @as([*]u8, @ptrFromInt(slot.line3.pending_buffer_ptr))[0..hw.header_len];

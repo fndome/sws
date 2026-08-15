@@ -13,7 +13,6 @@ const TCP_ACCEPT_USER_DATA = @import("../constants.zig").TCP_ACCEPT_USER_DATA;
 const MAX_CQES_BATCH = @import("../constants.zig").MAX_CQES_BATCH;
 const USER_TASK_BATCH = @import("../constants.zig").USER_TASK_BATCH;
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
-const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 const CLOSE_USER_DATA_FLAG = @import("../stack_pool.zig").CLOSE_USER_DATA_FLAG;
 const packUserData = @import("../stack_pool.zig").packUserData;
@@ -227,8 +226,8 @@ pub fn dispatchCqes(self: *AsyncServer, cqes: []linux.io_uring_cqe, n: usize) vo
                     const bid = @as(u16, @truncate(cqe.flags >> 16));
                     self.buffer_pool.markReplenish(bid);
                 }
-                if (conn_ptr.pool_idx != NO_POOL_SLOT) {
-                    self.pool.slots[conn_ptr.pool_idx].line4.writev_in_flight = 0;
+                if (self.connSlot(conn_ptr)) |slot| {
+                    slot.line4.writev_in_flight = 0;
                 }
                 self.closeConn(conn_id, conn_ptr.fd);
             } else if (conn_ptr.state == .waiting_computation) {
