@@ -18,6 +18,10 @@ const write_progress = @import("write_progress.zig");
 /// protocol state transition to the caller (http/ws/tcp complete differently).
 /// write_body/tls_ciphertext are null for ws/raw-tcp, so the guarded frees are
 /// no-ops there.
+///
+/// Call this before the caller re-arms I/O (flushWsWriteQueue/submitRead):
+/// clearing writev_in_flight first is required, because submitWrite checks it
+/// and would otherwise refuse the next write.
 pub fn finishWriteCleanup(self: *AsyncServer, conn: *Connection) void {
     conn.write_retries = 0;
     if (conn.pool_idx != NO_POOL_SLOT) {
