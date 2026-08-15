@@ -396,6 +396,12 @@ pub const AsyncServer = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // init() returns by value, so self.rs may still hold pointers to the
+        // init frame if run() was never called. Re-point before teardown so the
+        // DNS resolver removes dns_ud from the live registry, not a dangling one.
+        self.rs.rebind(&self.ring, &self.io_registry);
+        self.dns_resolver.rebind(self.rs);
+
         if (self.next) |*n| n.deinit();
 
         self.rs.invoke.drain(self.allocator);
