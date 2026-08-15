@@ -32,7 +32,7 @@ pub const RingB = struct {
     ring: linux.IoUring,
     registry: IORegistry,
     rs: RingShared,
-    dns: DnsResolver,
+    dns: *DnsResolver,
     invoke: InvokeQueue,
     /// 内建出站连接缓存：同 host:port 在 TTL 内复用 TCP 连接。
     /// RingB.tick() 自动淘汰过期条目，用户无需干预。
@@ -59,20 +59,26 @@ pub const RingB = struct {
         var registry = IORegistry.init(allocator);
         errdefer registry.deinit();
 
-        const rs = RingShared.bind(&ring, &registry);
-        const dns = try DnsResolver.init(allocator, &ring, &registry, io, ns_ip);
+        const dns = try allocator.create(DnsResolver);
+        errdefer allocator.destroy(dns);
+        dns.* = try DnsResolver.init(allocator, io, ns_ip);
         errdefer dns.deinit();
 
-        return RingB{
+        var ring_b = RingB{
             .allocator = allocator,
             .ring = ring,
             .registry = registry,
-            .rs = rs,
+            .rs = undefined,
             .dns = dns,
             .invoke = .{},
             .http_cache = TinyCache.init(allocator, cache_ttl_ms),
             .connecting = std.StringHashMap(u32).init(allocator),
         };
+        // Bind rs to RingB's own fields (not the moved-in locals) and register
+        // the DNS resolver on its final heap address with that stable rs.
+        ring_b.rs = RingShared.bind(&ring_b.ring, &ring_b.registry);
+        try ring_b.dns.register(ring_b.rs);
+        return ring_b;
     }
 
     pub fn deinit(self: *RingB) void {
@@ -86,6 +92,7 @@ pub const RingB = struct {
         self.connecting.deinit();
         self.invoke.drain(self.allocator);
         self.dns.deinit();
+        self.allocator.destroy(self.dns);
         self.registry.deinit();
         self.ring.deinit();
     }

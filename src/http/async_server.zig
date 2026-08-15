@@ -155,7 +155,7 @@ pub const AsyncServer = struct {
     io_pinned: bool = false,
 
     /// DNS 解析器 (io_uring 异步 UDP DNS)
-    dns_resolver: DnsResolver,
+    dns_resolver: *DnsResolver,
 
     /// HTTP 请求 fiber 执行器
     next: ?Next = null,
@@ -320,7 +320,9 @@ pub const AsyncServer = struct {
         errdefer io_registry.deinit();
 
         const ns_ip = readResolvConfNameserver() catch @as(u32, 0x0a60000a);
-        var dns_resolver = try DnsResolver.init(allocator, &ring, &io_registry, io, ns_ip);
+        const dns_resolver = try allocator.create(DnsResolver);
+        errdefer allocator.destroy(dns_resolver);
+        dns_resolver.* = try DnsResolver.init(allocator, io, ns_ip);
         errdefer dns_resolver.deinit();
 
         var conn_pool = try StackPool(StackSlot).init(allocator, cfg.max_connections);
@@ -376,6 +378,10 @@ pub const AsyncServer = struct {
             server.tls_config = tls_config;
         }
         server.rs = RingShared.bind(&server.ring, &server.io_registry);
+        // Register the DNS resolver on its final (heap) address with the
+        // server's stable RingShared. Doing this inside DnsResolver.init would
+        // store a dangling pointer because init returns by value.
+        try server.dns_resolver.register(server.rs);
 
         try server.buffer_pool.provideAllReads(&server.ring);
 
@@ -456,6 +462,7 @@ pub const AsyncServer = struct {
         self.tick_hooks.deinit(self.allocator);
         // 修改原因：DnsResolver.deinit 会从 io_registry 中移除 dns_ud，必须早于 io_registry.deinit，否则 ReleaseFast 退出会访问已释放的 hashmap。
         self.dns_resolver.deinit();
+        self.allocator.destroy(self.dns_resolver);
         self.io_registry.deinit();
         self.submit_registry.deinit();
         self.ring.deinit();

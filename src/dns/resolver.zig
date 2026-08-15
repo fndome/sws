@@ -55,8 +55,6 @@ pub const DnsResolver = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        ring: *linux.IoUring,
-        registry: *@import("../shared/io_registry.zig").IORegistry,
         io: std.Io,
         nameserver_ip: u32,
     ) !DnsResolver {
@@ -77,18 +75,15 @@ pub const DnsResolver = struct {
             _ = linux.close(fd);
             return error.BindFailed;
         }
-        // 修改原因：bind 成功后如果后续注册 user_data 失败，必须关闭 UDP fd，避免初始化失败路径泄漏 socket。
+        // 修改原因：bind 成功后如果后续初始化失败，必须关闭 UDP fd，避免初始化失败路径泄漏 socket。
         errdefer _ = linux.close(fd);
-
-        const rs = RingShared.bind(ring, registry);
-        const dns_ud = try rs.alloc(@ptrCast(@constCast(&fd)), &dnsDispatch);
 
         return DnsResolver{
             .allocator = allocator,
-            .rs = rs,
+            .rs = undefined,
             .io = io,
             .udp_fd = fd,
-            .dns_ud = dns_ud,
+            .dns_ud = 0,
             .nameserver_ip = nameserver_ip,
             .nameserver_port = packet.DNS_PORT,
             .cache = DnsCache.init(allocator),
@@ -100,11 +95,26 @@ pub const DnsResolver = struct {
         };
     }
 
+    /// Register this resolver with the shared IORegistry so its CQEs are
+    /// dispatched back here. Must be called once, on the resolver's final
+    /// address, with the owner's stable RingShared. Split from init() because
+    /// init() returns the resolver by value (its address changes on the move),
+    /// so registering inside init() would store a dangling pointer — the same
+    /// bug fixed for UdpServer.
+    pub fn register(self: *DnsResolver, rs: RingShared) !void {
+        self.rs = rs;
+        self.dns_ud = try self.rs.alloc(@ptrCast(self), &dnsDispatch);
+    }
+
     pub fn deinit(self: *DnsResolver) void {
         self.cache.deinit();
         self.pending.deinit();
         self.results.deinit();
-        self.rs.remove(self.dns_ud);
+        // dns_ud == 0 means register() was never called (init error path);
+        // self.rs is undefined in that case, so skip the registry remove.
+        if (self.dns_ud != 0) {
+            self.rs.remove(self.dns_ud);
+        }
         if (self.udp_fd >= 0) {
             _ = linux.close(self.udp_fd);
             self.udp_fd = -1;
