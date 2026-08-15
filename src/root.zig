@@ -44,7 +44,6 @@ pub const InvokeQueue = @import("shared/io_invoke.zig").InvokeQueue;
 pub const HttpRing = @import("client/ring.zig").HttpRing;
 pub const HttpClient = @import("client/http_client.zig").HttpClient;
 pub const HttpCaresDns = @import("client/dns.zig").CaresDns;
-pub const DNS_FD_MAGIC = @import("client/dns.zig").DNS_FD_MAGIC;
 pub const TinyCache = @import("client/tiny_cache.zig").TinyCache;
 pub const StackSlot = @import("stack_pool.zig").StackSlot;
 pub const LargeBufferPool = @import("shared/large_buffer_pool.zig").LargeBufferPool;
