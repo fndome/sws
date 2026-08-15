@@ -51,8 +51,15 @@ pub fn slotAlloc(pool: anytype, fd: i32, conn_gen_id: *u32, now_ms: i64) struct 
     var gen_id = conn_gen_id.*;
     // 修改原因：gen_id=0 会被 getSlotChecked 视为无效，计数器初始化或回绕时必须跳过 0。
     if (gen_id == 0) gen_id = 1;
-    conn_gen_id.* = gen_id +% 1;
-    if (conn_gen_id.* == 0) conn_gen_id.* = 1;
+    // packUserData/unpackGenId only encode 28 bits of gen_id (bits 60-63 are
+    // reserved for CLOSE/ACCEPT/client flags). Without masking here, once the
+    // counter passes 2^28 getSlotChecked's gen match always fails and every
+    // CQE for these connections is silently dropped. Cap to 28 bits like
+    // IORegistry.allocUserData does.
+    gen_id &= 0x0FFFFFFF;
+    if (gen_id == 0) gen_id = 1;
+    conn_gen_id.* = gen_id + 1;
+    if (conn_gen_id.* > 0x0FFFFFFF) conn_gen_id.* = 1;
 
     const slot = &pool.slots[idx];
     // Debug: verify sentinel intact (catches buffer overflow from previous slot user)
@@ -62,6 +69,12 @@ pub fn slotAlloc(pool: anytype, fd: i32, conn_gen_id: *u32, now_ms: i64) struct 
     // line5 (workspace + sentinel) is preserved — sentinel is verified above.
     slot.line3 = .{};
     slot.line4 = .{};
+    // line5.ws is a union of protocol scratch (HttpWork.pending_bid/pending_len,
+    // WsWork, ComputeWork). A previous connection closed mid-header-reassembly
+    // leaves stale pending_bid/pending_len here; a reused slot would then
+    // misinterpret that state on its first read and splice stale bytes into the
+    // new request. Reset the workspace (but keep the sentinel) on every alloc.
+    @memset(&slot.line5.ws.raw, 0);
     slot.line1.gen_id = gen_id;
     slot.line1.fd = fd;
     slot.line1.state = .reading;
@@ -365,4 +378,42 @@ test "slotAlloc skips zero generation ids" {
     try std.testing.expectEqual(@as(u32, 1), pool.slots[allocated.idx].line1.gen_id);
     try std.testing.expectEqual(@as(u32, 2), gen_id);
     try std.testing.expect(getSlotChecked(&pool, allocated.token) != null);
+}
+
+test "slotAlloc clears stale workspace from previous connection" {
+    var pool = try StackPool(StackSlot).init(std.testing.allocator, 1);
+    defer pool.deinit(std.testing.allocator);
+    pool.warmup();
+
+    var gen_id: u32 = 1;
+
+    // First connection leaves stale HTTP parse state in the workspace,
+    // as happens when it is closed mid-header-reassembly.
+    const first = slotAlloc(&pool, 42, &gen_id, 100);
+    const hw = httpWork(&pool.slots[first.idx]);
+    hw.pending_bid = 7;
+    hw.pending_len = 64;
+    slotFree(&pool, first.idx);
+
+    // Second connection reuses the same slot; the workspace must be clean.
+    const second = slotAlloc(&pool, 43, &gen_id, 200);
+    const hw2 = httpWork(&pool.slots[second.idx]);
+    try std.testing.expectEqual(@as(u16, 0), hw2.pending_bid);
+    try std.testing.expectEqual(@as(u16, 0), hw2.pending_len);
+    slotFree(&pool, second.idx);
+}
+
+test "slotAlloc caps gen_id to the 28-bit user_data field" {
+    var pool = try StackPool(StackSlot).init(std.testing.allocator, 1);
+    defer pool.deinit(std.testing.allocator);
+    pool.warmup();
+
+    // Simulate the counter just below the 28-bit wrap boundary.
+    var gen_id: u32 = 0x0FFFFFFF;
+    const a = slotAlloc(&pool, 42, &gen_id, 100);
+    try std.testing.expectEqual(@as(u32, 0x0FFFFFFF), pool.slots[a.idx].line1.gen_id);
+    // Token must round-trip through the masked 28-bit field (non-zero gen).
+    try std.testing.expect(getSlotChecked(&pool, a.token) != null);
+    try std.testing.expectEqual(@as(u32, 1), gen_id); // counter wrapped to 1
+    slotFree(&pool, a.idx);
 }
