@@ -14,6 +14,8 @@ const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
+const maxWriteRetries = @import("write_progress.zig").maxWriteRetries;
+const advanceOffset = @import("write_progress.zig").advanceOffset;
 
 pub fn onTcpAcceptComplete(self: *AsyncServer, res: i32) void {
     self.tcp_accept_outstanding = false;
@@ -217,7 +219,7 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
         return;
     }
     const conn = self.getConn(conn_id) orelse return;
-    conn.write_offset += @as(usize, @intCast(res));
+    conn.write_offset = advanceOffset(conn.write_offset, @as(usize, @intCast(res)), conn.write_headers_len);
     if (conn.write_offset >= conn.write_headers_len) {
         conn.write_retries = 0;
         if (conn.pool_idx != NO_POOL_SLOT) {
@@ -244,7 +246,7 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
         }
     } else {
         conn.write_retries += 1;
-        if (conn.write_retries > @import("http_response.zig").maxWriteRetries(conn.write_headers_len)) {
+        if (conn.write_retries > maxWriteRetries(conn.write_headers_len)) {
             logErr("tcp write retries exceeded for fd={d}", .{conn.fd});
             if (conn.pool_idx != NO_POOL_SLOT) {
                 self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;

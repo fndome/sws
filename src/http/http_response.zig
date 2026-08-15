@@ -33,13 +33,6 @@ pub fn statusText(code: u16) []const u8 {
     };
 }
 
-pub fn maxWriteRetries(total: usize) u8 {
-    if (total <= 1460) return 3;
-    const base: usize = total / 4096;
-    const retries: usize = if (base < 4) @as(usize, 4) else if (base > 64) @as(usize, 64) else base;
-    return @intCast(retries);
-}
-
 pub fn headerOnlyCapacity(extra_headers_len: usize) usize {
     return 256 + extra_headers_len;
 }

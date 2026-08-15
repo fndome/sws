@@ -11,7 +11,8 @@ const build_options = @import("build_options");
 const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 
-const maxWriteRetries = @import("http_response.zig").maxWriteRetries;
+const write_progress = @import("write_progress.zig");
+const maxWriteRetries = write_progress.maxWriteRetries;
 
 fn queuePendingWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
     self.pending_writes.append(self.allocator, conn_id) catch {
@@ -127,8 +128,8 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
             return onTlsWriteComplete(self, conn_id, conn, res);
         }
     }
-    conn.write_offset += @as(usize, @intCast(res));
-    const total = conn.write_headers_len + if (conn.write_body) |b| b.len else 0;
+    const total = write_progress.writeTotal(conn.write_headers_len, if (conn.write_body) |b| b.len else 0);
+    conn.write_offset = write_progress.advanceOffset(conn.write_offset, @as(usize, @intCast(res)), total);
     if (conn.write_offset >= total) {
         conn.write_retries = 0;
         if (conn.pool_idx != NO_POOL_SLOT) {
@@ -296,13 +297,11 @@ fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: 
     else
         0;
     const body_len = if (conn.write_body) |b| b.len else 0;
-    const total = header_len + body_len;
+    const total = write_progress.writeTotal(header_len, body_len);
 
     // Advance write_offset by the plaintext that was encrypted in submitTlsWrite.
     // submitTlsWrite packs up to 16384 bytes of plaintext per chunk.
-    const remaining = if (total > conn.write_offset) total - conn.write_offset else 0;
-    const chunk_plaintext = @min(remaining, @as(usize, 16384));
-    conn.write_offset += chunk_plaintext;
+    conn.write_offset += write_progress.tlsChunkAdvance(total, conn.write_offset);
 
     if (conn.write_offset >= total) {
         conn.write_retries = 0;

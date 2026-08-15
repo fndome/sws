@@ -824,10 +824,6 @@ pub const AsyncServer = struct {
     pub fn onTcpWriteComplete(self: *Self, conn_id: u64, res: i32, user_data: u64) void {
         tcp_handler.onTcpWriteComplete(self, conn_id, res, user_data);
     }
-
-    fn maxWriteRetries(total: usize) u8 {
-        return http_response.maxWriteRetries(total);
-    }
 };
 
 const statusText = http_response.statusText;

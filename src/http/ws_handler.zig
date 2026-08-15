@@ -21,6 +21,8 @@ const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 const WS_TASK_TAG = @import("../constants.zig").WS_TASK_TAG;
 const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
+const maxWriteRetries = @import("write_progress.zig").maxWriteRetries;
+const advanceOffset = @import("write_progress.zig").advanceOffset;
 const MAX_WS_ACCUMULATED_FRAME_SIZE: usize = 1024 * 1024;
 
 fn wsFrameInput(allocator: Allocator, conn: *Connection, data: []u8, owned_out: *?[]u8) ![]u8 {
@@ -420,7 +422,7 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
         return;
     }
     const conn = self.getConn(conn_id) orelse return;
-    conn.write_offset += @as(usize, @intCast(res));
+    conn.write_offset = advanceOffset(conn.write_offset, @as(usize, @intCast(res)), conn.write_headers_len);
     if (conn.write_offset >= conn.write_headers_len) {
         conn.write_retries = 0;
         // write completed — clear flag before flushWsWriteQueue may call
@@ -572,13 +574,6 @@ pub fn drainWsWriteQueue(self: *AsyncServer, conn: *Connection) void {
     conn.ws_write_queue_head = null;
     conn.ws_write_queue_tail = null;
     conn.is_writing = false;
-}
-
-fn maxWriteRetries(total: usize) u8 {
-    if (total <= 1460) return 3;
-    const base: usize = total / 4096;
-    const retries: usize = if (base < 4) @as(usize, 4) else if (base > 64) @as(usize, 64) else base;
-    return @intCast(retries);
 }
 
 test "WebSocket frame input accumulates split TCP reads" {
