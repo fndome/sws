@@ -1,5 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
+const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 
 pub const ConnState = if (build_options.tls_enabled) enum(u8) {
@@ -35,7 +36,7 @@ pub const Connection = struct {
     /// 0xFFFF = no fixed file registered; fall back to plain fd for I/O.
     fixed_index: u16 = 0xFFFF,
     state: ConnState = .reading,
-    read_bid: u16 = 0,
+    read_bid: u16 = NO_READ_BUFFER_BID,
     read_len: usize = 0,
     write_headers_len: usize = 0,
     write_offset: usize = 0,

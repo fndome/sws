@@ -11,6 +11,7 @@ const milliTimestamp = @import("event_loop.zig").milliTimestamp;
 const build_options = @import("build_options");
 const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
+const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 
 pub fn onTcpAcceptComplete(self: *AsyncServer, res: i32) void {
     self.tcp_accept_outstanding = false;
@@ -125,7 +126,7 @@ pub fn onRawData(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
             };
             if (decrypted == 0) {
                 self.buffer_pool.markReplenish(bid);
-                conn.read_bid = 0;
+                conn.read_bid = NO_READ_BUFFER_BID;
                 conn.read_len = 0;
                 self.submitRead(conn_id, conn) catch {
                     self.closeConn(conn_id, conn.fd);
@@ -136,7 +137,7 @@ pub fn onRawData(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
             effective_buf = plaintext_buf[0..decrypted];
             effective_nread = decrypted;
             tls_decrypted = true;
-            bid = 0;
+            bid = NO_READ_BUFFER_BID;
         } else {
             effective_buf = @constCast(read_buf[0..nread]);
         }
@@ -148,7 +149,7 @@ pub fn onRawData(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
         if (conn.read_len > 0) self.buffer_pool.markReplenish(conn.read_bid);
         conn.read_bid = bid;
     } else {
-        conn.read_bid = 0;
+        conn.read_bid = NO_READ_BUFFER_BID;
     }
     conn.read_len = effective_nread;
 

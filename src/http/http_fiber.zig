@@ -7,12 +7,13 @@ const RouteParam = @import("context.zig").RouteParam;
 const http_routing = @import("http_routing.zig");
 const logErr = @import("http_helpers.zig").logErr;
 const sticker = @import("../stack_pool_sticker.zig");
+const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 
 pub const HttpTaskCtx = struct {
     tag: u32,
     server: *AsyncServer,
     conn_id: u64,
-    read_bid: u16 = 0,
+    read_bid: u16 = NO_READ_BUFFER_BID,
     method_buf: [16]u8 = [_]u8{0} ** 16,
     method_len: u4 = 0,
     path_buf: [256]u8 = [_]u8{0} ** 256,
@@ -168,11 +169,11 @@ fn httpTaskRecycle(t: *HttpTaskCtx) void {
     // before this task completed (close CQE arrived first), skip connection
     // state updates but still replenish the buffer. markReplenish has internal
     // duplicate-bid detection for safety.
-    // read_bid == 0 is the "no buffer" sentinel set by the TLS decrypted path
-    // (the ciphertext buffer is already recycled inline). Replenishing bid 0
-    // would re-provide slab buffer 0 while it may still be in flight for
-    // another connection.
-    if (t.read_bid != 0) {
+    // read_bid == NO_READ_BUFFER_BID is the "no buffer" sentinel set by the TLS
+    // decrypted path (the ciphertext buffer is already recycled inline). A real
+    // read into buffer id 0 must still be replenished, so compare against the
+    // sentinel rather than 0.
+    if (t.read_bid != NO_READ_BUFFER_BID) {
         t.server.buffer_pool.markReplenish(t.read_bid);
     }
     if (t.server.connections.getPtr(t.conn_id)) |conn| {

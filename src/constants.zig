@@ -11,6 +11,11 @@ pub const BUFFER_POOL_SIZE = 16384;
 /// All blocks are for io_uring provided read buffers. Write buffers come from tiered pool.
 pub const READ_BUF_COUNT = BUFFER_POOL_SIZE;
 pub const READ_BUF_GROUP_ID = 0;
+/// Sentinel for "no provided read buffer is currently held" (0xFFFF = 65535 >
+/// BUFFER_POOL_SIZE, so BufferPool.markReplenish ignores it). Distinguishes
+/// "no buffer" from a read that landed on buffer id 0, which is a valid
+/// provided buffer (provideAllReads starts bids at 0).
+pub const NO_READ_BUFFER_BID: u16 = 0xFFFF;
 pub const ACCEPT_USER_DATA: u64 = (1 << 63);
 /// Raw-TCP accept marker. Must NOT share a bit with CLIENT_USER_DATA_FLAG
 /// (1<<62) or ACCEPT_USER_DATA (1<<63), otherwise a TCP-accept CQE could be

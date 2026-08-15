@@ -3,6 +3,7 @@ const std = @import("std");
 const AsyncServer = @import("async_server.zig").AsyncServer;
 const WsHandler = @import("../ws/server.zig").WsHandler;
 const ws_frame = @import("../ws/frame.zig");
+const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 
 const Fiber = @import("../next/fiber.zig").Fiber;
 
@@ -10,7 +11,7 @@ pub const WsTaskCtx = struct {
     tag: u32,
     server: *AsyncServer,
     conn_id: u64,
-    read_bid: u16 = 0,
+    read_bid: u16 = NO_READ_BUFFER_BID,
     payload_tier: u8 = 0,
     handler: WsHandler,
     frame: ws_frame.Frame,
@@ -35,9 +36,10 @@ fn wsTaskRecycle(t: *WsTaskCtx) void {
     // was freed before this task completed, skip connection state updates
     // but still replenish the buffer. markReplenish has internal duplicate-
     // bid detection for safety.
-    // read_bid == 0 is the "no buffer" sentinel set by the TLS decrypted path;
-    // replenishing it would re-provide slab buffer 0 while it may be in flight.
-    if (t.read_bid != 0) {
+    // read_bid == NO_READ_BUFFER_BID is the "no buffer" sentinel set by the TLS
+    // decrypted path (ciphertext already recycled inline). A real read into
+    // buffer id 0 must still be replenished, so compare against the sentinel.
+    if (t.read_bid != NO_READ_BUFFER_BID) {
         t.server.buffer_pool.markReplenish(t.read_bid);
     }
     if (t.server.connections.getPtr(t.conn_id)) |conn| {

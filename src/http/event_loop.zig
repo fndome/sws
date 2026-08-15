@@ -12,6 +12,7 @@ const ACCEPT_USER_DATA = @import("../constants.zig").ACCEPT_USER_DATA;
 const TCP_ACCEPT_USER_DATA = @import("../constants.zig").TCP_ACCEPT_USER_DATA;
 const MAX_CQES_BATCH = @import("../constants.zig").MAX_CQES_BATCH;
 const USER_TASK_BATCH = @import("../constants.zig").USER_TASK_BATCH;
+const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 const CLOSE_USER_DATA_FLAG = @import("../stack_pool.zig").CLOSE_USER_DATA_FLAG;
 const packUserData = @import("../stack_pool.zig").packUserData;
 const CLIENT_USER_DATA_FLAG = @import("../shared/io_registry.zig").CLIENT_USER_DATA_FLAG;
@@ -360,22 +361,22 @@ fn onTlsHandshake(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32,
     }
 
     var ciphertext: []const u8 = &.{};
-    var bid: u16 = 0;
+    var bid: u16 = NO_READ_BUFFER_BID;
     if (cqe_flags & linux.IORING_CQE_F_BUFFER != 0) {
         bid = @as(u16, @truncate(cqe_flags >> 16));
         ciphertext = self.buffer_pool.getReadBuf(bid)[0..@as(usize, @intCast(res))];
     }
 
-    if (conn.read_len > 0 and conn.read_bid != 0 and conn.read_bid != bid) {
+    if (conn.read_len > 0 and conn.read_bid != NO_READ_BUFFER_BID and conn.read_bid != bid) {
         self.buffer_pool.markReplenish(conn.read_bid);
     }
     conn.read_bid = bid;
     conn.read_len = ciphertext.len;
 
     const step = tls_stream.handshakeAdvance(if (ciphertext.len > 0) ciphertext else null) catch {
-        if (bid != 0) {
+        if (bid != NO_READ_BUFFER_BID) {
             self.buffer_pool.markReplenish(bid);
-            conn.read_bid = 0;
+            conn.read_bid = NO_READ_BUFFER_BID;
             conn.read_len = 0;
         }
         logErr("TLS handshake failed for fd {}", .{conn.fd});
@@ -385,9 +386,9 @@ fn onTlsHandshake(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32,
 
     switch (step) {
         .done => {
-            if (bid != 0) {
+            if (bid != NO_READ_BUFFER_BID) {
                 self.buffer_pool.markReplenish(bid);
-                conn.read_bid = 0;
+                conn.read_bid = NO_READ_BUFFER_BID;
                 conn.read_len = 0;
             }
             conn.state = .reading;
@@ -398,9 +399,9 @@ fn onTlsHandshake(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32,
             };
         },
         .want_read => {
-            if (bid != 0) {
+            if (bid != NO_READ_BUFFER_BID) {
                 self.buffer_pool.markReplenish(bid);
-                conn.read_bid = 0;
+                conn.read_bid = NO_READ_BUFFER_BID;
                 conn.read_len = 0;
             }
             conn.last_active_ms = milliTimestamp(self.io);
@@ -411,9 +412,9 @@ fn onTlsHandshake(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32,
         },
         .want_write => {
             const handshake_out = tls_stream.handshakeOutput();
-            if (bid != 0) {
+            if (bid != NO_READ_BUFFER_BID) {
                 self.buffer_pool.markReplenish(bid);
-                conn.read_bid = 0;
+                conn.read_bid = NO_READ_BUFFER_BID;
                 conn.read_len = 0;
             }
             submitTlsHandshakeWrite(self, conn_id, conn, handshake_out) catch |err| {
@@ -429,9 +430,9 @@ fn onTlsHandshake(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32,
             };
         },
         .@"error" => {
-            if (bid != 0) {
+            if (bid != NO_READ_BUFFER_BID) {
                 self.buffer_pool.markReplenish(bid);
-                conn.read_bid = 0;
+                conn.read_bid = NO_READ_BUFFER_BID;
                 conn.read_len = 0;
             }
             logErr("TLS handshake error for fd {}", .{conn.fd});

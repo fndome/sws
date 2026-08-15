@@ -20,6 +20,7 @@ const StackSlot = @import("../stack_pool.zig").StackSlot;
 const HttpWork = @import("../stack_pool.zig").HttpWork;
 const OVERSIZED_THRESHOLD = @import("../stack_pool.zig").OVERSIZED_THRESHOLD;
 const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
+const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 const TlsStream = @import("../tls/tls.zig").TlsStream;
 const READ_BUF_GROUP_ID = @import("../constants.zig").READ_BUF_GROUP_ID;
 const MAX_BUFFERED_BODY_SIZE: u64 = 1024 * 1024;
@@ -117,7 +118,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             plaintext_len = decrypted;
             if (decrypted == 0) {
                 self.buffer_pool.markReplenish(bid);
-                conn.read_bid = 0;
+                conn.read_bid = NO_READ_BUFFER_BID;
                 conn.read_len = 0;
                 self.submitRead(conn_id, conn) catch |err_sub| {
                     logErr("submitRead after TLS WANT_READ: {s}", .{@errorName(err_sub)});
@@ -127,7 +128,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             }
             self.buffer_pool.markReplenish(bid);
             tls_decrypted = true;
-            bid = 0;
+            bid = NO_READ_BUFFER_BID;
         }
     }
 
@@ -185,7 +186,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         }
         conn.read_bid = bid;
     } else {
-        conn.read_bid = 0;
+        conn.read_bid = NO_READ_BUFFER_BID;
     }
     conn.read_len = effective_nread;
 
@@ -205,12 +206,12 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         if (conn.pool_idx != 0xFFFFFFFF) {
             const slot = &self.pool.slots[conn.pool_idx];
             const hw = sticker.httpWork(slot);
-            if (reassembled_header or (build_options.tls_enabled and tls_decrypted and bid == 0)) {
+            if (reassembled_header or (build_options.tls_enabled and tls_decrypted and bid == NO_READ_BUFFER_BID)) {
                 savePendingHeaderCopy(self.allocator, slot, hw, effective_buf) catch {
-                    if (bid != 0) {
+                    if (bid != NO_READ_BUFFER_BID) {
                         self.buffer_pool.markReplenish(bid);
                     }
-                    conn.read_bid = 0;
+                    conn.read_bid = NO_READ_BUFFER_BID;
                     conn.read_len = 0;
                     conn.keep_alive = false;
                     self.respond(conn, 500, "Internal Server Error");
@@ -219,7 +220,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
                 if (!build_options.tls_enabled or !tls_decrypted) {
                     self.buffer_pool.markReplenish(bid);
                 }
-                conn.read_bid = 0;
+                conn.read_bid = NO_READ_BUFFER_BID;
             } else {
                 hw.pending_bid = bid;
                 hw.pending_len = @intCast(effective_nread);
@@ -400,7 +401,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             self.submitBodyRead(conn, large_buf, slot) catch {
                 // 修改原因：body read SQE 提交失败后不会再进入 processBodyRequest，必须归还之前保留的 header read buffer。
                 self.buffer_pool.markReplenish(bid);
-                conn.read_bid = 0;
+                conn.read_bid = NO_READ_BUFFER_BID;
                 conn.read_len = 0;
                 self.large_pool.release(large_buf);
                 slot.line3.large_buf_ptr = 0;
@@ -428,7 +429,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             self.submitBodyRead(conn, large_buf, slot) catch {
                 // 修改原因：body read SQE 提交失败后不会再进入 processBodyRequest，必须归还之前保留的 header read buffer。
                 self.buffer_pool.markReplenish(bid);
-                conn.read_bid = 0;
+                conn.read_bid = NO_READ_BUFFER_BID;
                 conn.read_len = 0;
                 self.large_pool.release(large_buf);
                 slot.line3.large_buf_ptr = 0;

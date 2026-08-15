@@ -8,6 +8,7 @@ const sticker = @import("../stack_pool_sticker.zig");
 const packUserData = @import("../stack_pool.zig").packUserData;
 const CLOSE_USER_DATA_FLAG = @import("../stack_pool.zig").CLOSE_USER_DATA_FLAG;
 const ACCEPT_USER_DATA = @import("../constants.zig").ACCEPT_USER_DATA;
+const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 const logErr = @import("http_helpers.zig").logErr;
 
 pub fn getConn(self: *AsyncServer, conn_id: u64) ?*Connection {
@@ -47,7 +48,7 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
                 conn.tls_ciphertext = null;
             }
         }
-        if (!conn.read_buf_recycled and conn.read_bid != 0) {
+        if (!conn.read_buf_recycled and conn.read_bid != NO_READ_BUFFER_BID) {
             conn.read_buf_recycled = true;
             self.buffer_pool.markReplenish(conn.read_bid);
         }

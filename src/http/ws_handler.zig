@@ -18,6 +18,7 @@ const milliTimestamp = @import("event_loop.zig").milliTimestamp;
 const build_options = @import("build_options");
 const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
+const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 const MAX_WS_ACCUMULATED_FRAME_SIZE: usize = 1024 * 1024;
 
 fn wsFrameInput(allocator: Allocator, conn: *Connection, data: []u8, owned_out: *?[]u8) ![]u8 {
@@ -49,7 +50,7 @@ fn storeIncompleteWsFrame(allocator: Allocator, conn: *Connection, data: []u8, o
 
 fn finishSynchronousWsHandler(self: *AsyncServer, conn_id: u64, conn: *Connection, bid: u16) void {
     // 修改原因：同步兜底 handler 使用的 payload 可能还指向 read buffer，必须等 handler 返回后再归还 bid。
-    if (bid > 0) self.buffer_pool.markReplenish(bid);
+    if (bid != NO_READ_BUFFER_BID) self.buffer_pool.markReplenish(bid);
     conn.read_buf_recycled = true;
     conn.read_len = 0;
     if (conn.state != .ws_writing) {
@@ -169,7 +170,7 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
             };
             if (decrypted == 0) {
                 self.buffer_pool.markReplenish(bid);
-                conn.read_bid = 0;
+                conn.read_bid = NO_READ_BUFFER_BID;
                 conn.read_len = 0;
                 self.submitRead(conn_id, conn) catch {
                     self.closeConn(conn_id, conn.fd);
@@ -180,7 +181,7 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
             effective_buf = plaintext_buf[0..decrypted];
             effective_nread = decrypted;
             tls_decrypted = true;
-            bid = 0;
+            bid = NO_READ_BUFFER_BID;
         } else {
             effective_buf = @constCast(read_buf[0..nread]);
         }
@@ -192,7 +193,7 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
         if (conn.read_len > 0) self.buffer_pool.markReplenish(conn.read_bid);
         conn.read_bid = bid;
     } else {
-        conn.read_bid = 0;
+        conn.read_bid = NO_READ_BUFFER_BID;
     }
     conn.read_len = effective_nread;
     var owned_frame_input: ?[]u8 = null;
