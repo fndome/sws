@@ -13,6 +13,36 @@ const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 
 const write_progress = @import("write_progress.zig");
 
+/// Free per-connection write buffers and reset write bookkeeping after a
+/// response write completes. Leaves write_offset/write_headers_len and the
+/// protocol state transition to the caller (http/ws/tcp complete differently).
+/// write_body/tls_ciphertext are null for ws/raw-tcp, so the guarded frees are
+/// no-ops there.
+pub fn finishWriteCleanup(self: *AsyncServer, conn: *Connection) void {
+    conn.write_retries = 0;
+    if (conn.pool_idx != NO_POOL_SLOT) {
+        self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+    }
+    if (conn.write_body) |b| {
+        self.allocator.free(b);
+        conn.write_body = null;
+    }
+    conn.write_start_ms = 0;
+    if (conn.pool_idx != NO_POOL_SLOT) {
+        self.pool.slots[conn.pool_idx].line2.write_start_ms = 0;
+    }
+    if (conn.response_buf) |buf| {
+        self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
+        conn.response_buf = null;
+    }
+    if (build_options.tls_enabled) {
+        if (conn.tls_ciphertext) |buf| {
+            self.allocator.free(buf);
+            conn.tls_ciphertext = null;
+        }
+    }
+}
+
 fn queuePendingWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
     self.pending_writes.append(self.allocator, conn_id) catch {
         // 修改原因：写 SQE 没提交成功时如果连重试队列也入不了，继续返回成功会让连接永久停在 writing。
@@ -131,22 +161,7 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
     conn.write_offset = write_progress.advanceOffset(conn.write_offset, @as(usize, @intCast(res)), total);
     switch (write_progress.classify(conn.write_offset, total, conn.write_retries)) {
         .complete => {
-            conn.write_retries = 0;
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
-            }
-            if (conn.write_body) |b| {
-                self.allocator.free(b);
-                conn.write_body = null;
-            }
-            conn.write_start_ms = 0;
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line2.write_start_ms = 0;
-            }
-            if (conn.response_buf) |buf| {
-                self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
-                conn.response_buf = null;
-            }
+            finishWriteCleanup(self, conn);
             if (self.ws_server.getActive(conn_id) != null) {
                 // 修改原因：WebSocket 101 升级完成后 keep_alive 在 tryWsUpgrade 被设为 false，
                 // 若不重置为 true，onWsWriteComplete 的 keep_alive 检查会把后续 pong/应用帧写入后断连。
@@ -305,26 +320,7 @@ fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: 
     conn.write_offset += write_progress.tlsChunkAdvance(total, conn.write_offset);
 
     if (conn.write_offset >= total) {
-        conn.write_retries = 0;
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
-        }
-        if (conn.write_body) |b| {
-            self.allocator.free(b);
-            conn.write_body = null;
-        }
-        conn.write_start_ms = 0;
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line2.write_start_ms = 0;
-        }
-        if (conn.response_buf) |buf| {
-            self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
-            conn.response_buf = null;
-        }
-        if (conn.tls_ciphertext) |buf| {
-            self.allocator.free(buf);
-            conn.tls_ciphertext = null;
-        }
+        finishWriteCleanup(self, conn);
         if (self.ws_server.getActive(conn_id) != null) {
             conn.keep_alive = true;
             conn.write_offset = 0;

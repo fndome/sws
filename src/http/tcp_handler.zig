@@ -16,6 +16,7 @@ const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 const write_progress = @import("write_progress.zig");
 const advanceOffset = write_progress.advanceOffset;
+const finishWriteCleanup = @import("tcp_write.zig").finishWriteCleanup;
 
 pub fn onTcpAcceptComplete(self: *AsyncServer, res: i32) void {
     self.tcp_accept_outstanding = false;
@@ -222,14 +223,7 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
     conn.write_offset = advanceOffset(conn.write_offset, @as(usize, @intCast(res)), conn.write_headers_len);
     switch (write_progress.classify(conn.write_offset, conn.write_headers_len, conn.write_retries)) {
         .complete => {
-            conn.write_retries = 0;
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
-            }
-            if (conn.response_buf) |buf| {
-                self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
-                conn.response_buf = null;
-            }
+            finishWriteCleanup(self, conn);
             if (conn.keep_alive) {
                 conn.write_offset = 0;
                 conn.write_headers_len = 0;

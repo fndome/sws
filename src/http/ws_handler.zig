@@ -23,6 +23,7 @@ const WS_TASK_TAG = @import("../constants.zig").WS_TASK_TAG;
 const NO_POOL_SLOT = @import("../constants.zig").NO_POOL_SLOT;
 const write_progress = @import("write_progress.zig");
 const advanceOffset = write_progress.advanceOffset;
+const finishWriteCleanup = @import("tcp_write.zig").finishWriteCleanup;
 const MAX_WS_ACCUMULATED_FRAME_SIZE: usize = 1024 * 1024;
 
 fn wsFrameInput(allocator: Allocator, conn: *Connection, data: []u8, owned_out: *?[]u8) ![]u8 {
@@ -425,24 +426,13 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
     conn.write_offset = advanceOffset(conn.write_offset, @as(usize, @intCast(res)), conn.write_headers_len);
     switch (write_progress.classify(conn.write_offset, conn.write_headers_len, conn.write_retries)) {
         .complete => {
-            conn.write_retries = 0;
-            // write completed — clear flag before flushWsWriteQueue may call
-            // submitWrite again (which checks writev_in_flight)
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
-            }
-            if (conn.response_buf) |buf| {
-                self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
-                conn.response_buf = null;
-            }
+            finishWriteCleanup(self, conn);
             conn.write_offset = 0;
             conn.write_headers_len = 0;
-            // A write completed: clear the write timer and refresh activity so the
-            // idle TTL measures from here, not from the stale last frame read.
-            conn.write_start_ms = 0;
+            // A write completed: refresh activity so the idle TTL measures from
+            // here, not from the stale last frame read.
             conn.last_active_ms = milliTimestamp(self.io);
             if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line2.write_start_ms = 0;
                 self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
             }
             if (!conn.keep_alive) {
