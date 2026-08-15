@@ -30,15 +30,24 @@ pub const RingShared = struct {
         self.registry = registry;
     }
 
+    /// bind() captures the init thread, but the ring is usually driven on a
+    /// different thread (e.g. HttpClient.start() spawns a dedicated ring
+    /// thread). Re-capture the actual driving thread there so ringPtr()'s
+    /// single-thread assertion is correct.
+    pub fn setIoThread(self: *RingShared) void {
+        self.io_tid = std.Thread.getCurrentId();
+    }
+
     /// 获取 ring（仅在 IO 线程合法）。Debug 下 worker 线程调用直接 panic。
     pub fn ringPtr(self: *const RingShared) *linux.IoUring {
         self.assertIoThread();
         return self.ring;
     }
 
-    /// 获取 registry（仅在 IO 线程合法）。
+    /// 获取 registry。无线程断言：registry 的 register/remove 合法地在
+    /// init/deinit（setup）线程与 IO 线程之间先后发生（init 在 start 前、
+    /// deinit 在 join 后），并非并发，逐线程断言会误报。
     pub fn registryPtr(self: *const RingShared) *IORegistry {
-        self.assertIoThread();
         return self.registry;
     }
 

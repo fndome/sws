@@ -443,6 +443,10 @@ pub const HttpClient = struct {
     }
 
     fn runClientThread(self: *HttpClient) void {
+        // The ring is driven on this (dedicated client) thread, not the thread
+        // that called RingB.init. Re-capture the IO thread id so ringPtr()'s
+        // single-thread assertion matches reality.
+        self.ring_b.rs.setIoThread();
         while (!@atomicLoad(bool, &self.stop, .acquire)) {
             self.ring_b.tick();
             self.ring_b.invoke.drain(self.allocator);
