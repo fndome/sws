@@ -106,6 +106,14 @@ pub const DnsResolver = struct {
         self.dns_ud = try self.rs.alloc(@ptrCast(self), &dnsDispatch);
     }
 
+    /// Re-point ring/registry after the owner moved to its final address.
+    /// Unlike register(), this does not re-allocate dns_ud nor assert the IO
+    /// thread; it only refreshes the stored pointers. Call it from the owner's
+    /// run()/init-on-final-address path after RingShared.rebind().
+    pub fn rebind(self: *DnsResolver, rs: RingShared) void {
+        self.rs = rs;
+    }
+
     pub fn deinit(self: *DnsResolver) void {
         self.cache.deinit();
         self.pending.deinit();

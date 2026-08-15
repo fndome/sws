@@ -398,6 +398,12 @@ pub const HttpClient = struct {
     const REQUEST_TIMEOUT_MS: i64 = 5000;
 
     pub fn init(allocator: Allocator, ring_b: *RingB) !*HttpClient {
+        // RingB.init returns by value, so ring_b.rs.ring/registry (bound
+        // inside init) point at the init frame. Re-point them at ring_b's
+        // final address and refresh the resolver's stored copy.
+        ring_b.rs.rebind(&ring_b.ring, &ring_b.registry);
+        ring_b.dns.rebind(ring_b.rs);
+
         const self = try allocator.create(HttpClient);
         self.* = .{
             .allocator = allocator,

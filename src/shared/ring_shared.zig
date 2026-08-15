@@ -20,6 +20,16 @@ pub const RingShared = struct {
         };
     }
 
+    /// Re-point ring/registry after the owning struct has moved to its final
+    /// address (e.g. AsyncServer/RingB are returned by value, so a bind() done
+    /// inside init stores pointers to the init frame). Preserves invoke (which
+    /// may already hold cross-thread items) and io_tid (register/remove happen
+    /// on the bind thread).
+    pub fn rebind(self: *RingShared, ring: *linux.IoUring, registry: *IORegistry) void {
+        self.ring = ring;
+        self.registry = registry;
+    }
+
     /// 获取 ring（仅在 IO 线程合法）。Debug 下 worker 线程调用直接 panic。
     pub fn ringPtr(self: *const RingShared) *linux.IoUring {
         self.assertIoThread();

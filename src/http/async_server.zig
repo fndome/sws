@@ -569,6 +569,9 @@ pub const AsyncServer = struct {
     }
 
     pub fn udp(self: *Self, bind_addr: []const u8, handler: UdpHandler) !void {
+        // init() returned by value, so self.rs may still hold pointers to the
+        // init frame; re-point before handing rs to the UDP server.
+        self.rs.rebind(&self.ring, &self.io_registry);
         var us = try UdpServer.init(self.allocator, self.rs, bind_addr);
         us.handler = handler;
         us.ctx = self;
@@ -578,6 +581,9 @@ pub const AsyncServer = struct {
     }
 
     pub fn udp4Sync(self: *Self, bind_addr: []const u8, handler: UdpHandler) !void {
+        // init() returned by value, so self.rs may still hold pointers to the
+        // init frame; re-point before handing rs to the UDP server.
+        self.rs.rebind(&self.ring, &self.io_registry);
         var us = try UdpServer.init(self.allocator, self.rs, bind_addr);
         us.handler = handler;
         us.ctx = self;

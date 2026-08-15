@@ -62,6 +62,12 @@ pub fn run(self: *AsyncServer) !void {
     self.ws_server.ctx = self;
     self.tcp_server.ctx = self;
 
+    // AsyncServer.init returns the server by value, so self.rs.ring/registry
+    // (bound inside init) point at the temporary local. Re-point them at the
+    // final address and refresh the DNS resolver's stored copy.
+    self.rs.rebind(&self.ring, &self.io_registry);
+    self.dns_resolver.rebind(self.rs);
+
     if (self.cfg.io_cpu) |cpu| {
         var mask: linux.cpu_set_t = [_]usize{0} ** (linux.CPU_SETSIZE / @sizeOf(usize));
         mask[0] = @as(usize, 1) << @as(u6, cpu);
