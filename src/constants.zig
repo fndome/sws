@@ -12,7 +12,12 @@ pub const BUFFER_POOL_SIZE = 16384;
 pub const READ_BUF_COUNT = BUFFER_POOL_SIZE;
 pub const READ_BUF_GROUP_ID = 0;
 pub const ACCEPT_USER_DATA: u64 = (1 << 63);
-pub const TCP_ACCEPT_USER_DATA: u64 = 1 << 62;
+/// Raw-TCP accept marker. Must NOT share a bit with CLIENT_USER_DATA_FLAG
+/// (1<<62) or ACCEPT_USER_DATA (1<<63), otherwise a TCP-accept CQE could be
+/// misrouted to the client registry. Bit 61 is free: CLIENT_WRITE_USER_DATA_FLAG
+/// (1<<61) is only ever set together with bit 62, so a lone bit-61 value is
+/// unambiguous.
+pub const TCP_ACCEPT_USER_DATA: u64 = 1 << 61;
 pub const MAX_FIXED_FILES = 65535; // 0..65534 valid, 0xFFFF sentinel reserved
 pub const MAX_PATH_LENGTH = 2048;
 pub const IDLE_TIMEOUT_MS = 30000;
