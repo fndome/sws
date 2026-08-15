@@ -24,16 +24,16 @@ const write_progress = @import("write_progress.zig");
 /// and would otherwise refuse the next write.
 pub fn finishWriteCleanup(self: *AsyncServer, conn: *Connection) void {
     conn.write_retries = 0;
-    if (conn.pool_idx != NO_POOL_SLOT) {
-        self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+    if (self.connSlot(conn)) |slot| {
+        slot.line4.writev_in_flight = 0;
     }
     if (conn.write_body) |b| {
         self.allocator.free(b);
         conn.write_body = null;
     }
     conn.write_start_ms = 0;
-    if (conn.pool_idx != NO_POOL_SLOT) {
-        self.pool.slots[conn.pool_idx].line2.write_start_ms = 0;
+    if (self.connSlot(conn)) |slot| {
+        slot.line2.write_start_ms = 0;
     }
     if (conn.response_buf) |buf| {
         self.buffer_pool.freeTieredWriteBuf(buf, conn.response_buf_tier);
@@ -61,8 +61,8 @@ pub fn submitWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
         conn.write_retries = 0;
         // Mirror the write start time into the slot so ttlScan can enforce
         // write_timeout_ms without a per-connection hashmap lookup.
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
+        if (self.connSlot(conn)) |slot| {
+            slot.line2.write_start_ms = conn.write_start_ms;
         }
     }
 
@@ -80,12 +80,11 @@ pub fn submitWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
     // Defensive: onWriteComplete and closeConn both guard pool_idx, but
     // submitWrite did not. Without a valid slot, writev_in_flight and
     // write_iovs are inaccessible — close the connection rather than OOB.
-        if (conn.pool_idx == NO_POOL_SLOT) {
+    const slot = self.connSlot(conn) orelse {
         logErr("submitWrite: no pool slot for fd={d}, closing", .{conn.fd});
         self.closeConn(conn_id, conn.fd);
         return;
-    }
-    const slot = &self.pool.slots[conn.pool_idx];
+    };
 
     if (slot.line4.writev_in_flight != 0) {
         logErr("submitWrite: writev already in-flight for fd={d}, skipping", .{conn.fd});
@@ -149,8 +148,8 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
     _ = user_data;
     if (res <= 0) {
         const conn = self.getConn(conn_id) orelse return;
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+        if (self.connSlot(conn)) |slot| {
+            slot.line4.writev_in_flight = 0;
         }
         self.closeConn(conn_id, conn.fd);
         return;
@@ -184,8 +183,8 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
                 conn.write_offset = 0;
                 conn.write_headers_len = 0;
                 conn.last_active_ms = milliTimestamp(self.io);
-                if (conn.pool_idx != NO_POOL_SLOT) {
-                    self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
+                if (self.connSlot(conn)) |slot| {
+                    slot.line2.last_active_ms = conn.last_active_ms;
                 }
                 self.submitRead(conn_id, conn) catch |err| {
                     logErr("submitRead failed for keep-alive fd {}: {s}", .{ conn.fd, @errorName(err) });
@@ -197,28 +196,28 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
         },
         .retry => {
             conn.write_retries += 1;
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+            if (self.connSlot(conn)) |slot| {
+                slot.line4.writev_in_flight = 0;
             }
             // A partial write CQE means the client is still reading; refresh the
             // timer so write_timeout_ms measures time since last progress, not
             // since the write began (otherwise slow large responses are killed).
             conn.write_start_ms = milliTimestamp(self.io);
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
+            if (self.connSlot(conn)) |slot| {
+                slot.line2.write_start_ms = conn.write_start_ms;
             }
             self.submitWrite(conn_id, conn) catch |err| {
                 logErr("submitWrite failed for fd {}: {s}", .{ conn.fd, @errorName(err) });
-                if (conn.pool_idx != NO_POOL_SLOT) {
-                    self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+                if (self.connSlot(conn)) |slot| {
+                    slot.line4.writev_in_flight = 0;
                 }
                 self.closeConn(conn_id, conn.fd);
             };
         },
         .give_up => {
             logErr("write retries exceeded for fd {} ({} attempts, {} bytes total)", .{ conn.fd, conn.write_retries + 1, total });
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+            if (self.connSlot(conn)) |slot| {
+                slot.line4.writev_in_flight = 0;
             }
             self.closeConn(conn_id, conn.fd);
         },
@@ -234,12 +233,11 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
 
     // Defensive: closeConn and general write paths guard pool_idx; TLS
     // path was missed when TLS support was added in #58.
-        if (conn.pool_idx == NO_POOL_SLOT) {
+    const slot = self.connSlot(conn) orelse {
         logErr("submitTlsWrite: no pool slot for fd={d}, closing", .{conn.fd});
         self.closeConn(conn_id, conn.fd);
         return;
-    }
-    const slot = &self.pool.slots[conn.pool_idx];
+    };
 
     if (slot.line4.writev_in_flight != 0) {
         return error.WriteInFlight;
@@ -295,16 +293,16 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
 fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32) void {
     if (build_options.tls_enabled) {
     if (res <= 0) {
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+        if (self.connSlot(conn)) |slot| {
+            slot.line4.writev_in_flight = 0;
         }
         self.closeConn(conn_id, conn.fd);
         return;
     }
 
     if (conn.tls_write_len > 0 and @as(u32, @intCast(res)) != conn.tls_write_len) {
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+        if (self.connSlot(conn)) |slot| {
+            slot.line4.writev_in_flight = 0;
         }
         conn.tls_write_len = 0;
         self.closeConn(conn_id, conn.fd);
@@ -341,8 +339,8 @@ fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: 
             conn.write_offset = 0;
             conn.write_headers_len = 0;
             conn.last_active_ms = milliTimestamp(self.io);
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line2.last_active_ms = conn.last_active_ms;
+            if (self.connSlot(conn)) |slot| {
+                slot.line2.last_active_ms = conn.last_active_ms;
             }
             self.submitRead(conn_id, conn) catch |err| {
                 logErr("submitRead failed for keep-alive fd {}: {s}", .{ conn.fd, @errorName(err) });
@@ -353,19 +351,19 @@ fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: 
         }
     } else {
         // More plaintext to encrypt, submit next chunk
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+        if (self.connSlot(conn)) |slot| {
+            slot.line4.writev_in_flight = 0;
         }
         // Partial progress: refresh the timer so write_timeout_ms tracks time
         // since last progress rather than since the write started.
         conn.write_start_ms = milliTimestamp(self.io);
-        if (conn.pool_idx != NO_POOL_SLOT) {
-            self.pool.slots[conn.pool_idx].line2.write_start_ms = conn.write_start_ms;
+        if (self.connSlot(conn)) |slot| {
+            slot.line2.write_start_ms = conn.write_start_ms;
         }
         self.submitWrite(conn_id, conn) catch |err| {
             logErr("submitWrite failed for TLS chunk fd {}: {s}", .{ conn.fd, @errorName(err) });
-            if (conn.pool_idx != NO_POOL_SLOT) {
-                self.pool.slots[conn.pool_idx].line4.writev_in_flight = 0;
+            if (self.connSlot(conn)) |slot| {
+                slot.line4.writev_in_flight = 0;
             }
             self.closeConn(conn_id, conn.fd);
         };

@@ -677,6 +677,13 @@ pub const AsyncServer = struct {
         return connection_mgr.getConn(self, conn_id);
     }
 
+    /// The connection's pool slot, or null if it has no slot (NO_POOL_SLOT).
+    /// Centralizes the repeated `pool_idx != NO_POOL_SLOT` guard + slots[] index.
+    pub fn connSlot(self: *Self, conn: *const Connection) ?*StackSlot {
+        if (conn.pool_idx == constants.NO_POOL_SLOT) return null;
+        return &self.pool.slots[conn.pool_idx];
+    }
+
     pub fn closeConn(self: *Self, conn_id: u64, fd: i32) void {
         connection_mgr.closeConn(self, conn_id, fd);
     }
