@@ -17,7 +17,7 @@ pub fn getPathFromRequestWithLimit(buf: []const u8, max_path_length: usize) ?[]c
     const second_space = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
     const raw = rest[0..second_space];
     const q_pos = std.mem.indexOfScalar(u8, raw, '?') orelse raw.len;
-    // 修改原因：max_path_length 限制的是路由 path，不应把 query string 计入；否则短路径大查询会被误拒绝。
+    // max_path_length limits the routing path, not the query string; otherwise a short path with a large query would be wrongly rejected.
     if (q_pos == 0 or q_pos > max_path_length) return null;
     return raw[0..q_pos];
 }
@@ -34,7 +34,7 @@ pub fn isKeepAliveConnection(buf: []const u8) bool {
         if (line.len == 0) break;
         if (std.ascii.startsWithIgnoreCase(line, "Connection:")) {
             const value = std.mem.trim(u8, line["Connection:".len..], " \t");
-            // 修改原因：Connection 是逗号分隔 token，不能用子串匹配；同时协议版本只能从请求行判断。
+            // Connection is a comma-separated token list, not a substring; the protocol version must come from the request line alone.
             if (headerValueHasToken(value, "close")) return false;
             if (headerValueHasToken(value, "keep-alive")) return true;
         }
@@ -64,7 +64,7 @@ fn headerValueHasToken(value: []const u8, token: []const u8) bool {
     return false;
 }
 
-/// 从 HTTP 请求行中提取 URI 的完整路径（含 query string）
+/// Extract the full URI path (including the query string) from the HTTP request line.
 pub fn getFullUri(buf: []const u8) ?[]const u8 {
     const end = std.mem.indexOf(u8, buf, "\r\n") orelse std.mem.indexOfScalar(u8, buf, '\n') orelse return null;
     const line = buf[0..end];
@@ -75,7 +75,7 @@ pub fn getFullUri(buf: []const u8) ?[]const u8 {
     return rest[0..second_space];
 }
 
-/// 从 query string 中提取指定参数的值
+/// Extract a parameter value from the query string.
 pub fn extractQueryParam(uri: []const u8, name: []const u8) ?[]const u8 {
     const q_pos = std.mem.indexOfScalar(u8, uri, '?') orelse return null;
     const qs = uri[q_pos + 1 ..];
@@ -91,7 +91,7 @@ pub fn extractQueryParam(uri: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// 从 HTTP 请求头部提取指定 header 的值（大小写不敏感）
+/// Extract a header value from the HTTP request (case-insensitive).
 pub fn extractHeader(data: []const u8, name: []const u8) ?[]const u8 {
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |raw_line| {
@@ -100,7 +100,7 @@ pub fn extractHeader(data: []const u8, name: []const u8) ?[]const u8 {
         if (std.ascii.startsWithIgnoreCase(line, name)) {
             if (line.len <= name.len) return null;
             const after = line[name.len..];
-            // 修改原因：tcp_read 已支持 LF-only 请求头结束符，header 提取也必须同样兼容，同时仍要求冒号避免误匹配。
+            // tcp_read already supports LF-only header terminators, so header extraction must match, while still requiring a colon to avoid false matches.
             if (after.len > 0 and after[0] == ':') {
                 return std.mem.trim(u8, after[1..], " \t\r\n");
             }
@@ -122,7 +122,7 @@ pub fn parseIpv4(ip_str: []const u8) !u32 {
         (@as(u32, octets[1]) << 16) |
         (@as(u32, octets[2]) << 8) |
         (@as(u32, octets[3]));
-    // 修改原因：linux.sockaddr.in.addr 需要内存中为网络字节序，直接返回文本序数值会把 127.0.0.1 绑定成 1.0.0.127。
+    // linux.sockaddr.in.addr requires network byte order in memory; returning the host-order value would bind 127.0.0.1 as 1.0.0.127.
     return std.mem.nativeToBig(u32, ip);
 }
 
@@ -131,9 +131,9 @@ fn parseNameserverLine(line: []const u8) ?u32 {
     const keyword = "nameserver";
     if (!std.mem.startsWith(u8, trimmed, keyword)) return null;
     const rest = trimmed[keyword.len..];
-    // 修改原因：resolv.conf 允许用任意空白分隔关键字和值，不能只识别单个空格。
+    // resolv.conf allows any whitespace between keyword and value, so a single space must not be assumed.
     if (rest.len == 0 or (rest[0] != ' ' and rest[0] != '\t')) return null;
-    // 修改原因：nameserver 行允许在地址后继续写空白和注释，解析 IP 时只能取第一个字段。
+    // A nameserver line may contain trailing whitespace and comments after the address, so only the first field is parsed as the IP.
     var fields = std.mem.tokenizeAny(u8, std.mem.trim(u8, rest, " \t\r"), " \t\r");
     const ip_str = fields.next() orelse return null;
     return parseIpv4(ip_str) catch null;
@@ -142,7 +142,7 @@ fn parseNameserverLine(line: []const u8) ?u32 {
 fn openReadOnly(path: [*:0]const u8) !i32 {
     const flags: std.os.linux.O = @bitCast(@as(u32, 0));
     const raw_fd = std.os.linux.open(path, flags, 0);
-    // 修改原因：linux.open 返回 usize，失败时要用 errno 判断，不能用 raw_fd < 0 检查。
+    // linux.open returns usize, so failure must be checked via errno, not raw_fd < 0.
     if (std.os.linux.errno(raw_fd) != .SUCCESS) return error.FileNotFound;
     return @intCast(raw_fd);
 }

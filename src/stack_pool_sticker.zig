@@ -21,12 +21,12 @@ pub fn logErr(comptime fmt: []const u8, args: anytype) void {
     @import("async_logger.zig").logErr(fmt, args);
 }
 
-/// ── 全系统总开关 ──────────────────────────────────────
+/// ── System-wide master switch ─────────────────────────
 ///
-/// 从 io_uring CQE user_data 中解出 index + gen_id，校验后返回 Slot 指针。
-/// 幽灵事件防御：gen_id 不匹配 → null，调用方必须丢弃该 CQE。
+/// Decode index + gen_id from the io_uring CQE user_data, validate, and return the Slot pointer.
+/// Ghost-event defense: gen_id mismatch → null; the caller must discard that CQE.
 ///
-/// 用法：
+/// Usage:
 ///   const slot = getSlotChecked(&pool, cqe.user_data) orelse {
 ///       if (cqe.flags & IORING_CQE_F_BUFFER != 0)
 ///           pool.buffer_pool.markReplenish(extractBid(cqe.flags));
@@ -47,12 +47,12 @@ pub fn extractBid(cqe_flags: u32) u16 {
     return @truncate(cqe_flags >> 16);
 }
 
-/// ── Slot 生命周期 ─────────────────────────────────────
-/// 分配并初始化一个槽位。返回 index + user_data token。
+/// ── Slot lifecycle ────────────────────────────────────
+/// Allocate and initialize a slot. Returns the index + user_data token.
 pub fn slotAlloc(pool: anytype, fd: i32, conn_gen_id: *u32, now_ms: i64) struct { idx: u32, token: u64 } {
     const idx = pool.acquire() orelse return .{ .idx = NO_POOL_SLOT, .token = 0 };
     var gen_id = conn_gen_id.*;
-    // 修改原因：gen_id=0 会被 getSlotChecked 视为无效，计数器初始化或回绕时必须跳过 0。
+    // Defensive: gen_id=0 is treated as invalid by getSlotChecked, so the counter must skip 0 on init or wrap.
     if (gen_id == 0) gen_id = 1;
     // packUserData/unpackGenId only encode 28 bits of gen_id (bits 60-63 are
     // reserved for CLOSE/ACCEPT/client flags). Without masking here, once the
@@ -104,7 +104,7 @@ pub fn slotAlloc(pool: anytype, fd: i32, conn_gen_id: *u32, now_ms: i64) struct 
     return .{ .idx = idx, .token = packUserData(gen_id, idx) };
 }
 
-/// 释放槽位：注销 live 列表、清零 gen_id、归还 freelist。
+/// Free a slot: unregister from the live list, zero gen_id, return to the freelist.
 pub fn slotFree(pool: anytype, idx: u32) void {
     const slot = &pool.slots[idx];
     const list_pos = slot.line2.active_list_pos;
@@ -115,9 +115,9 @@ pub fn slotFree(pool: anytype, idx: u32) void {
     pool.release(idx);
 }
 
-/// ── TTL 扫描器 ────────────────────────────────────────
-/// 增量滑窗 TTL 扫描。每轮检查 scan_cursor 起的 window 个活跃槽位。
-/// 返回超时槽位的索引列表（调用方负责 close）。
+/// ── TTL scanner ───────────────────────────────────────
+/// Incremental sliding-window TTL scan. Each round checks `window` active slots starting at scan_cursor.
+/// Returns the list of timed-out slot indices (the caller is responsible for closing them).
 pub fn ttlScan(
     pool: anytype,
     allocator: Allocator,
@@ -169,13 +169,13 @@ pub fn ttlScan(
     }
 }
 
-/// ── 大报文判定 ────────────────────────────────────────
+/// ── Oversized-request classification ───────────────────
 pub fn isOversized(content_length: u64) bool {
     return content_length > OVERSIZED_THRESHOLD;
 }
 
-/// ── 限速检查 ──────────────────────────────────────────
-/// 简单滑动窗口限速。返回 true 表示放行，false 表示超限。
+/// ── Rate-limit check ──────────────────────────────────
+/// Simple sliding-window rate limiting. Returns true to allow, false when over the limit.
 pub fn rateLimitCheck(slot: *StackSlot, now_ms: i64, max_per_window: u32, window_ms: i64) bool {
     if (now_ms - slot.line1.req_window_ms >= window_ms) {
         slot.line1.req_window_ms = now_ms;
@@ -187,7 +187,7 @@ pub fn rateLimitCheck(slot: *StackSlot, now_ms: i64, max_per_window: u32, window
     return true;
 }
 
-/// ── user_data 构造快捷方式 ────────────────────────────
+/// ── user_data construction helpers ─────────────────────
 pub fn readToken(slot: *const StackSlot) u64 {
     return packUserData(slot.line1.gen_id, @truncate(0)); // idx set by caller
 }
@@ -196,30 +196,30 @@ pub fn closeToken(slot: *const StackSlot, idx: u32) u64 {
     return packUserData(slot.line1.gen_id, idx) | CLOSE_USER_DATA_FLAG;
 }
 
-/// ── Workspace 访问 ────────────────────────────────────
-/// 二级计算区原始字节（60B），用于短读拼包等通用操作
+/// ── Workspace access ──────────────────────────────────
+/// Raw bytes of the secondary compute area (60B), for short-read reassembly and other generic ops.
 pub fn rawWorkspace(slot: *StackSlot) []u8 {
     return &slot.line5.ws.raw;
 }
 
-/// HTTP 协议解析工作区：存 header 解析中间态，避免重复扫描
+/// HTTP protocol parse workspace: holds header-parse intermediate state to avoid re-scanning.
 pub fn httpWork(slot: *StackSlot) *HttpWork {
     return &slot.line5.ws.http;
 }
 
-/// WebSocket 帧解析工作区：掩码 + 分片状态
+/// WebSocket frame parse workspace: mask + fragmentation state.
 pub fn wsWork(slot: *StackSlot) *WsWork {
     return &slot.line5.ws.websocket;
 }
 
-/// Worker Pool 移交工作区：存大块内存指针 + 计算结果
+/// Worker Pool handoff workspace: holds the large-block pointer + compute result.
 pub fn computeWork(slot: *StackSlot) *ComputeWork {
     return &slot.line5.ws.compute;
 }
 
-/// ── Worker Pool 零拷贝移交 ────────────────────────────
-/// 将大块 buffer 指针和 slot index 存入 workspace.compute，
-/// Worker 处理完后通过 index 找回 slot 写入 result_code。
+/// ── Worker Pool zero-copy handoff ──────────────────────
+/// Store the large buffer pointer and slot index into workspace.compute;
+/// after the Worker finishes it looks up the slot by index and writes result_code.
 pub fn dispatchCompute(slot: *StackSlot, job_id: u64, buf_ptr: u64) void {
     const cw = &slot.line5.ws.compute;
     cw.job_id = job_id;
@@ -231,9 +231,9 @@ pub fn completeCompute(slot: *StackSlot, result_code: i32) void {
     slot.line5.ws.compute.result_code = result_code;
 }
 
-/// ── ChunkStream 指针存取 ──────────────────────────────
-/// stream_ptr 存于 slot.line3，指向堆分配的 StreamHandle。
-/// IO 线程读完数据 → feed → 攒够 → dispatch → Worker 线程解析。
+/// ── ChunkStream pointer access ─────────────────────────
+/// stream_ptr lives in slot.line3 and points to a heap-allocated StreamHandle.
+/// IO thread reads data → feed → accumulate → dispatch → Worker thread parses.
 pub fn getStream(slot: *StackSlot) ?*anyopaque {
     const ptr = @as(usize, @intCast(slot.line3.stream_ptr));
     if (ptr == 0) return null;
@@ -248,24 +248,24 @@ pub fn clearStream(slot: *StackSlot) void {
     slot.line3.stream_ptr = 0;
 }
 
-/// ── 协议视图切换 ──────────────────────────────────────
-/// HTTP → WebSocket 升级：清空 HTTP 解析残留，初始化 WS 视图
+/// ── Protocol view switch ──────────────────────────────
+/// HTTP → WebSocket upgrade: clear leftover HTTP parse state and initialize the WS view.
 pub fn switchToWs(slot: *StackSlot) void {
     @memset(&slot.line5.ws.raw, 0);
     slot.line5.ws.websocket.is_final = false;
     slot.line5.ws.websocket.payload_len = 0;
 }
 
-/// ── 哨兵校验 ──────────────────────────────────────────
+/// ── Sentinel check ────────────────────────────────────
 pub fn sentinelIntact(slot: *const StackSlot) bool {
     return slot.line5.sentinel == WORKSPACE_SENTINEL;
 }
 
-/// ── 全系统连接管理（封装 pool + hashmap 双查）──────────
-/// 过渡期同时维护 pool.slots[idx] 和 AutoHashMap(conn_id → Connection)。
-/// 未来 pool.slots 自含 Connection 后这些函数消失。
-/// CQE 分发入口：从 user_data 拿到 slot + Connection。
-/// 幽灵事件防御 → null；hashmap 无条目 → null。
+/// ── System-wide connection management (wraps pool + hashmap double lookup) ──
+/// During the transition, maintain both pool.slots[idx] and an AutoHashMap(conn_id → Connection).
+/// These functions disappear once pool.slots embeds the Connection.
+/// CQE dispatch entry: get the slot + Connection from user_data.
+/// Ghost-event defense → null; hashmap has no entry → null.
 pub fn lookupByToken(
     pool: anytype,
     connections: anytype,
@@ -276,7 +276,7 @@ pub fn lookupByToken(
     return .{ .slot = slot, .conn = conn_ptr };
 }
 
-/// 从旧 conn_id 反查（过渡期兼容旧调用路径）
+/// Reverse lookup from the old conn_id (transitional compatibility for legacy call paths).
 pub fn lookupByConnId(
     pool: anytype,
     connections: anytype,
@@ -289,7 +289,7 @@ pub fn lookupByConnId(
     return .{ .slot = slot, .idx = idx, .conn = conn };
 }
 
-/// 分配连接：pool.acquire + liveAdd + connections.put
+/// Allocate a connection: pool.acquire + liveAdd + connections.put.
 pub fn connAlloc(
     pool: anytype,
     connections: anytype,
@@ -302,7 +302,7 @@ pub fn connAlloc(
     const result = slotAlloc(pool, fd, conn_gen_id, now_ms);
     if (result.idx == NO_POOL_SLOT) return error.PoolFull;
     errdefer {
-        // 修改原因：connections.put 失败时必须归还已加入 live 的 slot，否则连接池容量会永久泄漏。
+        // Defensive: if connections.put fails, the slot already added to the live list must be returned, otherwise the pool capacity leaks permanently.
         slotFree(pool, result.idx);
     }
 
@@ -315,7 +315,7 @@ pub fn connAlloc(
     return result.token;
 }
 
-/// 释放连接：liveRemove + gen_id 清零 + pool.release + connections.remove
+/// Free a connection: liveRemove + zero gen_id + pool.release + connections.remove.
 pub fn connFree(
     pool: anytype,
     connections: anytype,
@@ -334,7 +334,7 @@ pub fn connFree(
     _ = connections.remove(conn_id);
 }
 
-/// 清理所有连接（deinit 时调用），对每个 conn 执行 slotFree
+/// Clean up all connections (called on deinit); runs slotFree for each conn.
 pub fn connFreeAll(
     pool: anytype,
     connections: anytype,
@@ -353,8 +353,8 @@ pub fn connFreeAll(
     }
 }
 
-/// 用 sticker 替换 dispatchCqes 中的手写 gen_id 检查
-/// 返回 (slot, conn_ptr)，无需调用方再查 hashmap。
+/// Replaces the hand-written gen_id check in dispatchCqes.
+/// Returns (slot, conn_ptr); the caller need not look up the hashmap again.
 pub fn dispatchToken(
     pool: anytype,
     connections: anytype,

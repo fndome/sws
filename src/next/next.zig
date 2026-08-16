@@ -215,24 +215,24 @@ pub const Next = struct {
             logErr("Next.push: ringbuffer full after retry, task dropped", .{});
             return false;
         }
-        // 修改原因：HTTP/WS 调用方需要知道是否入队成功，失败时才能回收请求缓冲。
+        // Defensive: HTTP/WS callers need to know whether enqueue succeeded so they can reclaim the request buffer on failure.
         return true;
     }
 
     /// ── Next.chainGoSubmit ─────────────────────────────────
     ///
-    /// 编程模型：Go（IO 线程 fiber，异步 DB/NATS 等）→ Submit（worker 池）→ 响应。
-    /// 同一 Ctx 流经两个阶段。execGo 异步收集全部数据后才触发 execSubmit，
-    /// 无需手动分配 DeferredResponse。
+    /// Programming model: Go (IO thread fiber, async DB/NATS, etc.) → Submit (worker pool) → response.
+    /// The same Ctx flows through both stages. execGo asynchronously collects all data before triggering execSubmit,
+    /// with no need to manually allocate a DeferredResponse.
     ///
-    /// 用法（handler 中一行搞定）：
+    /// Usage (one line in the handler):
     ///   try Next.chainGoSubmit(ctx, myCtx,
-    ///       execDb,       // fn(*MyCtx, complete) — IO 线程 fiber，collect 500 rows 后调 complete
-    ///       execCompute,  // fn(*MyCtx) — worker 池
-    ///       sendJson,     // fn(*MyCtx, *DeferredResponse) — 响应
+    ///       execDb,       // fn(*MyCtx, complete) — IO thread fiber, calls complete after collecting 500 rows
+    ///       execCompute,  // fn(*MyCtx) — worker pool
+    ///       sendJson,     // fn(*MyCtx, *DeferredResponse) — response
     ///   );
     ///
-    /// execGo 通过 complete 回调通知"已集齐所有数据"，此时自动切到 execSubmit。
+    /// execGo signals "all data collected" via the complete callback, at which point it automatically switches to execSubmit.
     pub fn chainGoSubmit(
         comptime T: type,
         http_ctx: *Context,
@@ -249,8 +249,8 @@ pub const Next = struct {
         errdefer alloc.destroy(resp);
         resp.* = .{ .server = server, .conn_id = http_ctx.conn_id, .allocator = alloc };
 
-        // ChainWrap.user 紧邻 chain 字段，execGo 收到 &w.user 后可
-        // 通过 @fieldParentPtr("user", user_ptr) 回到 ChainWrap
+        // ChainWrap.user sits right before the chain field, so after execGo receives &w.user it can
+        // get back to ChainWrap via @fieldParentPtr("user", user_ptr)
         const w = try alloc.create(ChainWrap(T));
         errdefer alloc.destroy(w);
         w.* = .{ .user = user_ctx, .chain = .{ .resp = resp, .allocator = alloc } };

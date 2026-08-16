@@ -67,7 +67,7 @@ pub fn buildQuery(hostname: []const u8, txid: u16) !QueryPacket {
     std.mem.writeInt(u16, buf[off..][0..2], 1, .big);
     off += 2;
 
-    // 修改原因：DNS UDP 请求只能发送实际写入的报文长度，不能把 512 字节缓冲区整体发出去。
+    // A DNS UDP request must only send the actually written message length, not the whole 512-byte buffer.
     return .{ .buf = buf, .len = off };
 }
 
@@ -76,7 +76,7 @@ fn encodeName(name: []const u8, out: []u8) !usize {
         out[0] = 0;
         return 1;
     }
-    // 修改原因：DNS 绝对域名允许末尾点，例如 example.com.；末尾点只表示 root，不能当成空 label 报错。
+    // Absolute DNS names allow a trailing dot, e.g. example.com.; the trailing dot only denotes the root and must not be reported as an empty label.
     const wire_name = if (name[name.len - 1] == '.') name[0 .. name.len - 1] else name;
     if (wire_name.len == 0) {
         out[0] = 0;
@@ -87,7 +87,7 @@ fn encodeName(name: []const u8, out: []u8) !usize {
     while (it.next()) |label| {
         if (label.len > 63) return error.LabelTooLong;
         if (label.len == 0) return error.EmptyLabel;
-        // 修改原因：DNS 名称线格式最长 255 字节，超长 hostname 必须返回错误，不能继续写固定缓冲区导致越界。
+        // The DNS name wire format is at most 255 bytes; an overlong hostname must error out instead of continuing to write into a fixed buffer and overflowing.
         if (off + 1 + label.len + 1 > 255) return error.NameTooLong;
         if (off + 1 + label.len > out.len) return error.NameTooLong;
         out[off] = @intCast(label.len);
@@ -119,12 +119,12 @@ pub fn parseResponse(packet: []const u8) ParsedResponse {
         resp.rcode = .SERVFAIL;
         return resp;
     }
-    // 修改原因：resolver 只发标准 QUERY，非 0 opcode 的响应不能按普通 hostname 查询结果解析。
+    // The resolver only sends standard QUERY; a response with a non-zero opcode cannot be parsed as a normal hostname query result.
     if (((flags1 >> 3) & 0x0F) != 0) {
         resp.rcode = .SERVFAIL;
         return resp;
     }
-    // 修改原因：TC 表示 UDP 响应已截断，继续使用其中的 A 记录会把不完整答案当成完整解析结果。
+    // TC means the UDP response was truncated; using its A records would treat an incomplete answer as a complete result.
     if ((flags1 & 0x02) != 0) {
         resp.rcode = .SERVFAIL;
         return resp;
@@ -135,14 +135,14 @@ pub fn parseResponse(packet: []const u8) ParsedResponse {
     if (resp.rcode != .NOERROR) return resp;
 
     const qdcount = std.mem.readInt(u16, packet[4..6], .big);
-    // 修改原因：resolver 只会发送单 question 查询，问题数异常的响应不能可靠对应当前 hostname。
+    // The resolver only sends a single-question query; a response with an unexpected question count cannot be reliably matched to the current hostname.
     if (qdcount != 1) {
         resp.rcode = .SERVFAIL;
         return resp;
     }
 
     const ancount = std.mem.readInt(u16, packet[6..8], .big);
-    // 修改原因：authority/additional section 中的 A 记录不是当前查询名的答案，不能当解析结果返回。
+    // A records in the authority/additional section are not answers for the queried name and must not be returned as the result.
     const total = ancount;
 
     var off: usize = 12;
@@ -161,7 +161,7 @@ pub fn parseResponse(packet: []const u8) ParsedResponse {
         }
         const qtype = std.mem.readInt(u16, packet[off..][0..2], .big);
         const qclass = std.mem.readInt(u16, packet[off + 2 ..][0..2], .big);
-        // 修改原因：resolver 只查询 A/IN，响应 question 回显不一致时不能信任后续 answer。
+        // The resolver only queries A/IN; when the echoed question does not match, the subsequent answers cannot be trusted.
         if (qtype != 1 or qclass != 1) {
             resp.rcode = .SERVFAIL;
             return resp;
@@ -173,13 +173,13 @@ pub fn parseResponse(packet: []const u8) ParsedResponse {
     var i: u16 = 0;
     while (i < total) : (i += 1) {
         off = skipName(packet, off) orelse {
-            // 修改原因：answer section 结构损坏时不能返回前面已解析的部分 A 记录，否则会缓存畸形 DNS 响应。
+            // When the answer section is structurally corrupt, the already-parsed A records must not be returned, or a malformed DNS response would be cached.
             resp.rcode = .SERVFAIL;
             resp.addrs.len = 0;
             return resp;
         };
         if (off + 10 > packet.len) {
-            // 修改原因：RR 头截断表示整包 answer section 不可信，不能把前面完整记录当成最终解析结果。
+            // A truncated RR header means the whole packet's answer section is untrusted, so the preceding complete records must not be treated as the final result.
             resp.rcode = .SERVFAIL;
             resp.addrs.len = 0;
             return resp;
@@ -194,20 +194,20 @@ pub fn parseResponse(packet: []const u8) ParsedResponse {
         off += 2;
 
         if (off + rdlen > packet.len) {
-            // 修改原因：RDATA 截断同样会让 answer count 与实际内容不一致，必须拒绝整包而不是使用部分地址。
+            // Truncated RDATA likewise makes the answer count inconsistent with the content, so the whole packet must be rejected rather than using partial addresses.
             resp.rcode = .SERVFAIL;
             resp.addrs.len = 0;
             return resp;
         }
 
-        // 修改原因：只有 IN class 的 A 记录才是 IPv4 地址答案，不能把 CHAOS/HS 等其它 class 的 A 记录写入连接地址。
+        // Only IN-class A records are IPv4 address answers; A records of other classes (CHAOS/HS, etc.) must not be written into the connect address.
         if (rtype == 1 and rclass == 1 and rdlen == 4) {
             if (resp.addrs.len < AddrList.MAX_ADDRS) {
                 const ip: u32 = (@as(u32, packet[off]) << 24) |
                     (@as(u32, packet[off + 1]) << 16) |
                     (@as(u32, packet[off + 2]) << 8) |
                     @as(u32, packet[off + 3]);
-                // 修改原因：A 记录会被后续 TCP connect 直接写入 sockaddr，需保存为网络字节序布局。
+                // A records are written directly into sockaddr by the later TCP connect, so they must be stored in network byte order.
                 resp.addrs.addrs[resp.addrs.len] = std.mem.nativeToBig(u32, ip);
                 resp.addrs.len += 1;
             }
@@ -226,11 +226,11 @@ fn skipName(packet: []const u8, start: usize) ?usize {
         const len = packet[off];
         if (len == 0) return off + 1;
         if (len & 0xC0 == 0xC0) {
-            // 修改原因：压缩指针必须完整占 2 字节，缺少第二字节时不能继续解析后续字段。
+            // A compression pointer must occupy a full 2 bytes; a missing second byte means the following fields cannot be parsed.
             if (off + 2 > packet.len) return null;
             return off + 2;
         }
-        // 修改原因：DNS 普通 label 最高两位必须为 00；保留格式和超长 label 都是 malformed name。
+        // A normal DNS label must have its top two bits set to 00; reserved formats and overlong labels are both malformed names.
         if ((len & 0xC0) != 0 or len > 63) return null;
         if (off + 1 + @as(usize, len) > packet.len) return null;
         off += @as(usize, len) + 1;
@@ -247,7 +247,7 @@ fn appendTestRootARecord(buf: []u8, off: *usize, ip: [4]u8) void {
     appendTestRootARecordWithClass(buf, off, ip, 1);
 }
 
-// 修改原因：DNS 响应测试样本必须带 resolver 实际发送的单 question，避免绕过 QDCOUNT 校验。
+// DNS response test samples must include the single question the resolver actually sends, to avoid bypassing the QDCOUNT check.
 fn appendTestRootQuestion(buf: []u8, off: *usize) void {
     appendTestRootQuestionWithTypeClass(buf, off, 1, 1);
 }

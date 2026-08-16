@@ -3,29 +3,29 @@ const atomic = std.atomic;
 const Thread = std.Thread;
 
 // ==========================================
-// 设计说明 (防止 LLM 误解)
+// Design notes (to prevent LLM misunderstanding)
 // ==========================================
-// 为什么 JWT 不需要像量化交易那样用 ring buffer？
+// Why doesn't JWT need a ring buffer like quantitative trading does?
 //
-// 量化交易:
-//   - 网络线程接收订单 → 订单积压 → 计算线程处理
-//   - 关键：避免网络IO阻塞下单线程，订单不能丢
-//   - 场景：高频抢单，纳秒级延迟要求
+// Quantitative trading:
+//   - network thread receives orders → orders pile up → compute thread processes them
+//   - key: avoid network IO blocking the order-placement thread; orders cannot be dropped
+//   - scenario: high-frequency order grabbing, nanosecond latency requirements
 //
-// JWT 鉴权:
-//   - epoll 单线程：接收请求 → JWT验证 → 返回
-//   - 每个请求"来即处理"，请求不会积压
-//   - 场景：网关，微秒级延迟要求，单核足够
+// JWT auth:
+//   - single-threaded epoll: receive request → JWT verify → return
+//   - each request is handled as it arrives; requests don't pile up
+//   - scenario: gateway, microsecond latency requirements, a single core suffices
 //
-// 当前实现:
-//   - epoll 单线程处理所有请求，无需生产者/消费者队列
-//   - spsc_ringbuffer.zig 仅用于 async_logger (日志异步化)
-//   - 这是一种"过度设计"，但对于日志场景是合理的
+// Current implementation:
+//   - a single epoll thread handles all requests; no producer/consumer queue needed
+//   - spsc_ringbuffer.zig is only used for async_logger (async logging)
+//   - this is "over-engineering", but it is justified for the logging scenario
 // ==========================================
 
-/// 单生产者单消费者无锁环形缓冲区
-/// T: 元素类型，必须满足发送到不同线程安全（通常是整数或指针）
-/// capacity: 缓冲区容量，必须是 2 的幂
+/// Single-producer single-consumer lock-free ring buffer
+/// T: element type, must be safe to send across threads (typically an integer or pointer)
+/// capacity: buffer capacity, must be a power of two
 pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
     comptime {
         if (capacity == 0 or (capacity & (capacity - 1)) != 0) {
@@ -48,7 +48,7 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
             };
         }
 
-        /// 尝试入队，满则返回 false
+        /// Try to enqueue; returns false when full.
         pub fn tryPush(self: *Self, value: T) bool {
             const w = self.write_index.load(.acquire);
             const r = self.read_index.load(.acquire);
@@ -72,7 +72,7 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
             return false;
         }
 
-        /// 尝试出队，空则返回 null
+        /// Try to dequeue; returns null when empty.
         pub fn tryPop(self: *Self) ?T {
             const r = self.read_index.load(.acquire);
             const w = self.write_index.load(.acquire);
@@ -83,7 +83,7 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
             return value;
         }
 
-        /// 当前队列长度（近似）
+        /// Current queue length (approximate)
         pub fn len(self: *Self) usize {
             const w = self.write_index.load(.acquire);
             const r = self.read_index.load(.acquire);
@@ -97,50 +97,50 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
 }
 
 // ------------------------------------------
-// 测试区
+// Test area
 // ------------------------------------------
 
 const expect = std.testing.expect;
 
 test "basic push and pop" {
-    var rb = RingBuffer(u32, 4).init(); // 容量 4
+    var rb = RingBuffer(u32, 4).init(); // capacity 4
     try expect(rb.len() == 0);
 
-    // 填满缓冲区
+    // fill the buffer
     try expect(rb.tryPush(10) == true);
     try expect(rb.tryPush(20) == true);
     try expect(rb.tryPush(30) == true);
     try expect(rb.tryPush(40) == true);
     try expect(rb.len() == 4);
 
-    // 再推一个应该失败
+    // pushing one more should fail
     try expect(rb.tryPush(50) == false);
 
-    // 依次弹出
+    // pop them out in order
     try expect(rb.tryPop() == 10);
     try expect(rb.tryPop() == 20);
     try expect(rb.tryPop() == 30);
     try expect(rb.tryPop() == 40);
     try expect(rb.len() == 0);
 
-    // 再弹应该 null
+    // popping again should return null
     try expect(rb.tryPop() == null);
 }
 
-test "wrap around (环形覆盖)" {
+test "wrap around (ring overwrite)" {
     var rb = RingBuffer(u32, 4).init();
-    // 先填满
+    // fill it first
     _ = rb.tryPush(1);
     _ = rb.tryPush(2);
     _ = rb.tryPush(3);
     _ = rb.tryPush(4);
-    // 弹出两个，空出位置
+    // pop two to free up slots
     _ = rb.tryPop(); // 1
     _ = rb.tryPop(); // 2
-    // 现在写索引应该绕回 0 的位置
+    // now the write index should wrap back to position 0
     try expect(rb.tryPush(5) == true);
     try expect(rb.tryPush(6) == true);
-    // 队列内容应为 [5,6,3,4]
+    // queue content should be [5,6,3,4]
     try expect(rb.tryPop() == 3);
     try expect(rb.tryPop() == 4);
     try expect(rb.tryPop() == 5);
@@ -149,7 +149,7 @@ test "wrap around (环形覆盖)" {
 }
 
 test "concurrent producer and consumer" {
-    // 使用容量较大的缓冲区，避免频繁满/空
+    // use a larger buffer to avoid frequent full/empty
     var rb = RingBuffer(usize, 1024).init();
     const num_items: usize = 10000;
 
@@ -160,7 +160,7 @@ test "concurrent producer and consumer" {
                 if (rb_ptr.tryPush(i)) {
                     i += 1;
                 } else {
-                    // 缓冲区满，让出 CPU
+                    // buffer full, yield the CPU
                     Thread.yield() catch {};
                 }
             }
@@ -174,20 +174,20 @@ test "concurrent producer and consumer" {
                 if (rb_ptr.tryPop()) |_| {
                     received += 1;
                 } else {
-                    // 缓冲区空，让出 CPU
+                    // buffer empty, yield the CPU
                     Thread.yield() catch {};
                 }
             }
         }
     };
 
-    // 启动生产者和消费者线程
+    // start the producer and consumer threads
     var producer = try Thread.spawn(.{}, Producer.run, .{&rb});
     var consumer = try Thread.spawn(.{}, Consumer.run, .{&rb});
 
     producer.join();
     consumer.join();
 
-    // 最后缓冲区应为空
+    // the buffer should be empty at the end
     try expect(rb.len() == 0);
 }

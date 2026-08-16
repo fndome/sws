@@ -1,14 +1,14 @@
 const std = @import("std");
 const RingBuffer = @import("../spsc_ringbuffer.zig").RingBuffer;
 
-/// 环形缓冲区条目（内部）
+/// Ring buffer entry (internal)
 pub const Item = struct {
     ctx: ?*anyopaque,
     execute: *const fn (ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []const u8) void) void,
     on_complete: *const fn (ctx: ?*anyopaque, result: []const u8) void,
 };
 
-/// 用户创建的 SPSC 提交队列。
+/// User-created SPSC submission queue.
 pub const SubmitQueue = struct {
     ring: RingBuffer(Item, 4096),
     registered: bool = false,
@@ -26,7 +26,7 @@ pub const SubmitQueue = struct {
     }
 };
 
-/// 提交队列注册表，挂在 AsyncServer 上。
+/// Submission queue registry, attached to AsyncServer.
 pub const SubmitQueueRegistry = struct {
     queues: std.ArrayList(*SubmitQueue),
     allocator: std.mem.Allocator,

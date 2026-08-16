@@ -80,7 +80,7 @@ pub fn retryWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) void {
 
 fn queuePendingWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
     self.pending_writes.append(self.allocator, conn_id) catch {
-        // 修改原因：写 SQE 没提交成功时如果连重试队列也入不了，继续返回成功会让连接永久停在 writing。
+        // If the write SQE fails to submit and the retry queue is also full, returning success would leave the connection stuck in writing forever.
         logErr("submitWrite: pend queue full, close fd={d}", .{conn.fd});
         return error.PendingWriteQueueFull;
     };
@@ -194,8 +194,8 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
         .complete => {
             finishWriteCleanup(self, conn);
             if (self.ws_server.getActive(conn_id) != null) {
-                // 修改原因：WebSocket 101 升级完成后 keep_alive 在 tryWsUpgrade 被设为 false，
-                // 若不重置为 true，onWsWriteComplete 的 keep_alive 检查会把后续 pong/应用帧写入后断连。
+                // After a WebSocket 101 upgrade, tryWsUpgrade sets keep_alive to false;
+                // without resetting it to true, onWsWriteComplete's keep_alive check would disconnect after writing later pong/application frames.
                 conn.keep_alive = true;
                 conn.write_offset = 0;
                 conn.write_headers_len = 0;

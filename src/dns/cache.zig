@@ -62,8 +62,8 @@ pub const DnsCache = struct {
         for (self.entries.items) |*entry| {
             if (entry.key_hash == hash and namesEqual(entry.name, name)) {
                 const name_dup = try self.allocator.dupe(u8, name);
-                // 修改原因：更新已有缓存项时必须先分配新 name，成功后再释放旧 name；
-                // 旧逻辑先 free 再 dupe，OOM 会把 entry.name 留成悬空指针。
+                // When updating an existing entry the new name must be allocated first and only then freed the old name;
+                // the old logic freed before dupe, which left entry.name dangling on OOM.
                 self.allocator.free(entry.name);
                 entry.name = name_dup;
                 entry.expires_at_ms = expires;
@@ -132,7 +132,7 @@ pub const DnsCache = struct {
 };
 
 fn namesEqual(a: []const u8, b: []const u8) bool {
-    // 修改原因：DNS 名称大小写不敏感，且末尾点只表示 root 终止；比较逻辑必须和查询编码保持一致。
+    // DNS names are case-insensitive and a trailing dot only denotes root termination; comparison must match the query encoding.
     return std.ascii.eqlIgnoreCase(canonicalName(a), canonicalName(b));
 }
 
@@ -142,7 +142,7 @@ fn canonicalName(name: []const u8) []const u8 {
 
 fn hashName(name: []const u8) u64 {
     var h: u64 = 0xcbf29ce484222325;
-    // 修改原因：example.com. 和 example.com 会编码成同一个 DNS qname，缓存 key 也要折叠末尾 root 点。
+    // example.com. and example.com encode to the same DNS qname, so the cache key must also fold the trailing root dot.
     for (canonicalName(name)) |c| {
         h ^= @as(u64, @intCast(std.ascii.toLower(c)));
         h *%= 0x100000001b3;

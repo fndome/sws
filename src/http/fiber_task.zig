@@ -47,7 +47,7 @@ fn wsTaskRecycle(t: *WsTaskCtx) void {
         conn.read_buf_recycled = true;
         conn.read_len = 0;
     }
-    // 修改原因：Next.push 会复制任务并自行释放任务内存，这里只释放任务持有的 payload。
+    // Next.push copies the task and frees its memory itself, so here only the task-owned payload is released.
     t.server.buffer_pool.freeTieredWriteBuf(t.payload_buf, t.payload_tier);
 }
 

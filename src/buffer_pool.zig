@@ -25,7 +25,7 @@ pub const BufferPool = struct {
         const slab = try allocator.alloc(u8, block_count * BUFFER_SIZE);
         errdefer allocator.free(slab);
 
-        // 修改原因：markReplenish 运行在读完成热路径，不能第一次归还 bid 时再因队列扩容 OOM 丢失 read buffer。
+        // Defensive: markReplenish runs on the read-completion hot path, so a read buffer must not be lost to a queue-growth OOM the first time a bid is returned.
         // Double capacity to absorb duplicate-bid edge cases before each flush cycle.
         var replenish_queue = try std.ArrayList(u16).initCapacity(allocator, block_count * 2);
         errdefer replenish_queue.deinit(allocator);

@@ -1,9 +1,9 @@
-/// ── Next.go 查数据库（自然存在，无需 main 里初始化）──
+/// ── Next.go queries the database (naturally available, no init in main needed) ──
 ///
-/// Next.go: 推 ringbuffer → IO 线程 fiber 执行，不切线程。
-/// server.GET 首次调用时自动 setDefault()，开箱即用。
+/// Next.go: pushes to the ringbuffer → runs on an IO thread fiber, no thread switch.
+/// The first server.GET call automatically calls setDefault(), works out of the box.
 ///
-/// 适用：io_uring 异步 DB
+/// Suitable for: io_uring async DB
 
 const std = @import("std");
 
@@ -22,7 +22,7 @@ const Ctx = struct {
 fn exec(c: *Ctx, complete: *const fn (?*anyopaque, []const u8) void) void {
     defer c.allocator.destroy(c);
     defer c.allocator.destroy(c.resp);
-    // DB 查询
+    // DB query
     c.resp.json(200, "[{\"id\":1}]");
     complete(c, "");
 }

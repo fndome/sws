@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 // ==========================================
-// 2. AntPath 路径匹配
+// 2. AntPath path matching
 // ==========================================
 
 pub const PathRule = struct {

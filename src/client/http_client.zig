@@ -32,7 +32,7 @@ fn nowMs() i64 {
 fn onData(stream: *RingSharedClient, ctx: ?*anyopaque, data: []u8) void {
     if (ctx) |ptr| {
         const cache: *TinyCache = @ptrCast(@alignCast(ptr));
-        // 修改原因：多个 fiber 可交错等待回包，必须按 stream 查 Pipe，不能使用全局 active_pipe。
+        // Multiple fibers can interleave waiting for replies, so the Pipe must be looked up by stream rather than a global active_pipe.
         if (cache.pipeForStream(stream)) |p| p.feed(data) catch |err| logErr("client pipe feed failed: {s}", .{@errorName(err)});
     }
 }
@@ -70,7 +70,7 @@ fn duplicateRequestParts(allocator: Allocator, headers: ?[]const u8, body: ?[]co
     var parts = RequestParts{};
     errdefer parts.deinit(allocator);
     if (headers) |h| {
-        // 修改原因：调用方传入 headers 时复制失败必须返回 OOM，不能静默丢掉鉴权等请求头继续发送。
+        // When the caller supplies headers, a copy failure must surface as OOM instead of silently dropping auth and other headers and continuing the send.
         parts.headers = try allocator.dupe(u8, h);
     }
     if (body) |b| {
@@ -231,7 +231,7 @@ pub const HttpClient = struct {
         if (!self.isBorrowedLocked(ctx.pool_id)) return;
         if (deinit_response) ctx.response.deinit();
         ctx.cleanup();
-        self.req_gen[ctx.pool_id] +%= 1; // bump gen → 旧 fiber notify 失效
+        self.req_gen[ctx.pool_id] +%= 1; // bump gen so stale fiber notify is invalidated
         self.req_pool_free[self.req_pool_top] = ctx.pool_id;
         self.req_pool_top += 1;
     }
@@ -268,7 +268,7 @@ pub const HttpClient = struct {
         ctx.headers = parts.headers;
         ctx.body = parts.body;
         ctx.done = false;
-        parts.headers = null; // 所有权已移交给 ctx
+        parts.headers = null; // ownership transferred to ctx
         parts.body = null;
 
         try self.ring_b.invoke.push(self.allocator, *RequestContext, ctx, handleRequest);
@@ -282,7 +282,7 @@ pub const HttpClient = struct {
                 if (nowMs() >= deadline_ms or @atomicLoad(bool, &self.stop, .acquire)) {
                     @atomicStore(bool, &ctx.cancelled, true, .release);
                     @atomicStore(bool, &ctx.done, true, .release);
-                    // 修改原因：超时后 IO fiber 仍可能持有 ctx，不能由调用线程释放后立刻复用该槽位。
+                    // After a timeout the IO fiber may still hold ctx, so the caller thread cannot release and immediately reuse the slot.
                     release_on_error = false;
                     return error.RequestTimeout;
                 }
@@ -313,7 +313,7 @@ const RequestContext = struct {
     // @atomicStore/.acquire is sufficient for the completion flag.
     fn notify(self: *RequestContext) void {
         if (@atomicLoad(bool, &self.cancelled, .acquire)) {
-            // 修改原因：取消请求的 response 由后台 IO 完成路径创建，必须在这里释放并归还请求池槽位。
+            // The response for a cancelled request is created by the background IO completion path, so it must be freed and the request-pool slot returned here.
             self.client.releaseCancelledReq(self);
             return;
         }
@@ -321,7 +321,7 @@ const RequestContext = struct {
     }
 
     fn cleanup(self: *RequestContext) void {
-        // 修改原因：fiber 可能先释放请求体，主线程 releaseReq 还会再次 cleanup，释放后必须清空指针。
+        // The fiber may free the request body first and the main thread's releaseReq will clean up again, so the pointers must be cleared after freeing.
         if (self.headers) |h| {
             self.allocator.free(h);
             self.headers = null;
@@ -359,7 +359,7 @@ fn handleRequest(allocator: Allocator, ctx_ptr: **RequestContext) void {
 }
 
 fn requestHeaderTerminator(headers: []const u8) []const u8 {
-    // 修改原因：调用方常传入单行 header；缺少结尾 CRLF 时直接拼接会把后续请求头拼进上一行。
+    // Callers often pass a single-line header; without a trailing CRLF, direct concatenation would splice later request headers into the previous line.
     if (headers.len == 0) return "";
     if (std.mem.endsWith(u8, headers, "\n")) return "";
     return "\r\n";
@@ -381,21 +381,21 @@ fn validateHeaderName(name: []const u8) bool {
 }
 
 fn validateCallerHeaders(headers: []const u8) !void {
-    // 修改原因：客户端自己生成 Host/Content-Length/Connection；允许调用方重复或提前插入空行会造成请求走私或 body 边界错误。
+    // The client generates Host/Content-Length/Connection itself; allowing the caller to duplicate them or insert an early blank line would cause request smuggling or body-boundary errors.
     if (headers.len == 0) return;
     var start: usize = 0;
     while (start < headers.len) {
         const rel_end = std.mem.indexOfScalar(u8, headers[start..], '\n');
         const end = if (rel_end) |idx| start + idx else headers.len;
         const line = std.mem.trimEnd(u8, headers[start..end], "\r");
-        // 修改原因：headers 会原样拼接进请求；行内 CR/控制字符会变成请求头注入或畸形报文，必须在客户端边界拒绝。
+        // Headers are spliced into the request verbatim; in-line CR/control characters would become header injection or a malformed message and must be rejected at the client boundary.
         for (line) |ch| {
             if (ch == '\r' or (ch < ' ' and ch != '\t') or ch == 0x7f) return error.InvalidHeaders;
         }
         if (line.len == 0) return error.InvalidHeaders;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidHeaders;
         const name = line[0..colon];
-        // 修改原因：headers 会原样发送，冒号前空白不能靠 trim 放行，否则客户端会生成畸形请求头。
+        // Headers are sent verbatim, so whitespace before the colon cannot be tolerated by trimming or the client would emit a malformed header.
         if (name.len != std.mem.trim(u8, name, " \t").len) return error.InvalidHeaders;
         if (!validateHeaderName(name) or isManagedRequestHeader(name)) return error.InvalidHeaders;
         if (rel_end) |_| {
@@ -407,7 +407,7 @@ fn validateCallerHeaders(headers: []const u8) !void {
 }
 
 fn requestTargetPrefix(path: []const u8) []const u8 {
-    // 修改原因：URL 形如 http://host?x=1 时 path 以 ? 开头，HTTP origin-form 必须补成 /?x=1。
+    // For a URL like http://host?x=1 the path starts with '?'; the HTTP origin-form must be padded to /?x=1.
     if (path.len > 0 and path[0] == '?') return "/";
     return "";
 }
@@ -581,7 +581,7 @@ fn httpRequestFiber(user_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []c
     var req_buf: [4096]u8 = undefined;
     const req = buildRequest(&req_buf, ctx.method, parsed.path, parsed.authority, ctx.headers, ctx.body) catch |err| {
         ctx.cleanup();
-        // 修改原因：请求过大时还没有写入上游，必须归还已借出的 pipe，避免连接池项永久停在 borrowed 状态。
+        // The oversized request has not been written upstream, so the borrowed pipe must be returned to avoid leaving the pool entry stuck in borrowed state.
         cache.release(pipe, nowMs());
         ctx.response = makeErrorResponse(ctx.allocator, 502, if (err == error.InvalidHeaders) "invalid request headers" else "request too large");
         ctx.notify();
@@ -590,7 +590,7 @@ fn httpRequestFiber(user_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []c
     stream.write(req) catch {
         ctx.cleanup();
         cache.evictPipe(pipe);
-        // Timeout → target 关服, 不重试
+        // Timeout → target is down; do not retry
         if (stream.conn_errno == -125 or stream.conn_errno == -110) {
             ctx.response = makeErrorResponse(ctx.allocator, 504, "upstream timeout");
         } else {
@@ -616,7 +616,7 @@ fn httpRequestFiber(user_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []c
     var invalid_response = false;
     const read_ok = blk: {
         while (true) {
-            // 修改原因：HTTP/1.1 keep-alive 不会主动关闭连接，读到完整响应就应停止等待。
+            // HTTP/1.1 keep-alive does not proactively close the connection, so reading stops once the complete response is available.
             const maybe_complete = responseCompleteLenForMethod(resp_buf[0..total], ctx.method) catch {
                 invalid_response = true;
                 break :blk false;
@@ -643,7 +643,7 @@ fn httpRequestFiber(user_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, []c
         ctx.response = resp;
         ctx.notify();
         if (responseHasTrailingBytes(total, complete_len) or responseWantsClose(resp_buf[0..complete_len])) {
-            // 修改原因：多余字节或 Connection: close 都说明连接不能安全复用，必须从池里淘汰。
+            // Trailing bytes or Connection: close both mean the connection cannot be safely reused, so it must be evicted from the pool.
             cache.evictPipe(pipe);
         } else {
             cache.release(pipe, nowMs());

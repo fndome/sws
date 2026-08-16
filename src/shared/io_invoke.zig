@@ -10,7 +10,7 @@ const InvokeNode = struct {
 pub const InvokeQueue = struct {
     head: ?*InvokeNode align(@alignOf(usize)) = null,
 
-    /// 任意线程安全投递。execFn 在 drain 时执行，负责释放 ctx 内部资源。
+    /// Safe to post from any thread. execFn runs during drain and is responsible for freeing the resources inside ctx.
     pub fn push(
         self: *InvokeQueue,
         allocator: Allocator,
@@ -42,7 +42,7 @@ pub const InvokeQueue = struct {
         }
     }
 
-    /// 仅 IO 线程调用。交换链表并逐条执行。
+    /// IO-thread only. Swaps the list out and executes each entry.
     pub fn drain(self: *InvokeQueue, allocator: Allocator) void {
         const head = @atomicRmw(?*InvokeNode, &self.head, .Xchg, null, .acquire);
         var node = head;

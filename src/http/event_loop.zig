@@ -27,7 +27,7 @@ pub fn milliTimestamp(io: std.Io) i64 {
 }
 
 pub fn stop(self: *AsyncServer) void {
-    // 修改原因：stop 可能由管理/压测线程触发，事件循环跨线程读取时需要原子同步。
+    // stop may be triggered from a management/benchmark thread, so the event loop's cross-thread read needs atomic synchronization.
     @atomicStore(bool, &self.should_stop, true, .release);
 }
 
@@ -42,7 +42,7 @@ pub fn installSigterm(self: *AsyncServer) void {
 }
 
 fn sigtermHandler(_: linux.SIG) callconv(.c) void {
-    // 修改原因：信号回调和事件循环不在同一执行点，普通 bool 写入会和主循环读取形成数据竞争。
+    // The signal handler and the event loop run at different points, so a plain bool write would race with the main loop's read.
     if (sigterm_server) |s| @atomicStore(bool, &s.should_stop, true, .release);
 }
 
@@ -168,7 +168,7 @@ pub fn run(self: *AsyncServer) !void {
 }
 
 pub fn dispatchCqes(self: *AsyncServer, cqes: []linux.io_uring_cqe, n: usize) void {
-    // 修改原因：Zig 0.16 的 copy_cqes 已经推进 CQ head，额外 cqe_seen 会跳过后续完成事件。
+    // Zig 0.16's copy_cqes already advances the CQ head; an extra cqe_seen would skip subsequent completion events.
     for (cqes[0..n]) |cqe| {
         const user_data = cqe.user_data;
         const res = cqe.res;

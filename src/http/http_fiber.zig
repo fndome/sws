@@ -25,7 +25,7 @@ pub const HttpTaskCtx = struct {
 };
 
 fn responseHeaderItems(headers: ?*const std.ArrayList(u8)) []const u8 {
-    // 修改原因：响应头只在 respondZeroCopy 同步组包时读取，不能因为复制 OOM 就静默丢掉调用方设置的 headers。
+    // Response headers are only read during respondZeroCopy's synchronous packing; an OOM must not silently drop caller-provided headers.
     if (headers) |h| return h.items;
     return "";
 }
@@ -41,7 +41,7 @@ pub fn httpTaskExec(caller_ctx: ?*anyopaque, complete: *const fn (?*anyopaque, [
 
     var request_body: []const u8 = "";
     if (t.body_data) |bd| {
-        // 修改原因：请求体不能占用 ctx.body；ctx.body 是响应体，混用会让中间件误判已响应。
+        // The request body must not occupy ctx.body; ctx.body is the response body, and mixing them would mislead middleware into thinking the request is already answered.
         request_body = bd;
         t.body_data = null;
         defer server.large_pool.release(bd);
@@ -192,7 +192,7 @@ fn httpTaskRecycle(t: *HttpTaskCtx) void {
         }
     }
     if (t.request_data_owned) {
-        // 修改原因：跨 TCP 分片重组出来的 request_data 是堆副本，任务结束必须释放。
+        // request_data reassembled across TCP fragments is a heap copy and must be freed when the task ends.
         t.server.allocator.free(t.request_data);
         t.request_data_owned = false;
     }

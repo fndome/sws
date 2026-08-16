@@ -8,7 +8,7 @@ const llmr_submit = @import("cpu_llmr_submit.zig");
 
 fn readPortEnv(default_port: u16) u16 {
     const raw = std.c.getenv("SWS_EXAMPLE_PORT") orelse return default_port;
-    // 修改原因：示例程序跟随自测脚本端口配置，避免本机已有 9090 服务时无法启动。
+    // Example program follows the self-test script's port config to avoid failing to start when a service already occupies 9090 locally.
     return std.fmt.parseInt(u16, std.mem.span(raw), 10) catch default_port;
 }
 

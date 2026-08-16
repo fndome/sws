@@ -54,13 +54,13 @@ pub const Connection = struct {
     ws_token: ?[]const u8 = null,
     accum_buf: ?[]u8 = null,
     write_retries: u8 = 0,
-    /// 读 buffer 是否已归还 io_uring provided buffer pool（防止二次回收）
+    /// Whether the read buffer has been returned to the io_uring provided buffer pool (prevents double-recycle).
     read_buf_recycled: bool = false,
-    /// 写 buffer (write_body + response_buf) 是否已在 close 路径释放（防止 double-free）
+    /// Whether the write buffers (write_body + response_buf) were freed on the close path (prevents double-free).
     write_bufs_freed: bool = false,
-    /// WebSocket 写锁：防止多个 Fiber 同时串扰帧数据
+    /// WebSocket write lock: prevents multiple fibers from interleaving frame data.
     is_writing: bool = false,
-    /// WebSocket 写等待队列头部指针（单 IO 线程无锁链表）
+    /// Head pointer of the WebSocket write queue (lock-free list on a single IO thread).
     ws_write_queue_head: ?*WsWriteQueueNode = null,
     ws_write_queue_tail: ?*WsWriteQueueNode = null,
     /// StackPool slot index (NO_POOL_SLOT = not pooled)
@@ -86,7 +86,7 @@ pub const Connection = struct {
     }
 };
 
-/// WebSocket 写队列节点（单 IO 线程，无需原子操作）
+/// WebSocket write queue node (single IO thread, no atomics needed).
 pub const WsWriteQueueNode = struct {
     opcode: @import("../ws/types.zig").Opcode,
     payload: []u8,

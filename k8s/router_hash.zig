@@ -1,15 +1,15 @@
-// router_hash.zig — Router 侧一致性哈希路由
+// router_hash.zig — Router-side consistent hash routing
 //
-// 与 pod_hash.zig 算法完全一致: FNV-1a + 150 vnodes + 二分查找
+// Identical to the pod_hash.zig algorithm: FNV-1a + 150 vnodes + binary search
 //
-// Router 用途: 客户端建连时确定目标 NodePort
+// Router use case: determine the target NodePort when a client connects
 //   hash(uid) → target ordinal → external "wss://DOMAIN:{NODEPORT_BASE+N}/ws"
-//   → 客户端收到 redirect → 直连 NodePort
+//   → client receives redirect → connects directly to the NodePort
 //
-// 用法:
+// Usage:
 //   var ring = HashRing.init(alloc, 0);
 //   try ring.addNode(0); try ring.addNode(1); try ring.addNode(2);
-//   // 建连时
+//   // when a client connects
 //   const addr = ring.routeToAddr(uid, domain, nodeport_base, &url_buf);
 //   // → ordinal=0, url="wss://ws.example.com:30001/ws"
 
@@ -75,7 +75,7 @@ pub const HashRing = struct {
         sortRing(self.vnodes.items);
     }
 
-    /// 路由: hash(user_id) → 目标节点 ordinal
+    /// Route: hash(user_id) → target node ordinal
     pub fn route(self: *const Self, user_id: u64) ?u8 {
         if (self.vnodes.items.len == 0) return null;
         const h = hash64(user_id);
@@ -84,12 +84,12 @@ pub const HashRing = struct {
         return self.vnodes.items[pos].node_id;
     }
 
-    /// ── Router 专用: hash → ordinal + external IP:PORT ─────
+    /// ── Router-specific: hash → ordinal + external IP:PORT ─────
     ///
-    /// domain 例: "ws.example.com"
-    /// nodeport_base 例: 30001
-    /// 返回目标 ordinal 和拼好的 redirect URL
-    /// 调用方: w.Write(redirect_json) → 客户端拿到后直连
+    /// domain example: "ws.example.com"
+    /// nodeport_base example: 30001
+    /// Returns the target ordinal and the assembled redirect URL
+    /// Caller: w.Write(redirect_json) → client connects directly once received
     pub fn routeToAddr(
         self: *const Self,
         user_id: u64,
@@ -157,7 +157,7 @@ fn hash64(v: u64) u64 {
     return h;
 }
 
-// ── 测试 ──────────────────────────────────────────────────────
+// ── Tests ──────────────────────────────────────────────────────
 
 test "router: route to addr" {
     const alloc = std.testing.allocator;

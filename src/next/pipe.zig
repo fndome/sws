@@ -3,11 +3,11 @@ const Allocator = std.mem.Allocator;
 const Fiber = @import("fiber.zig").Fiber;
 const RingSharedClient = @import("../shared/tcp_stream.zig").RingSharedClient;
 
-/// Pipe: 将 RingSharedClient 的推模型（on_data 回调）适配为拉模型（reader.read/writer.write）。
+/// Pipe: adapts RingSharedClient's push model (on_data callback) into a pull model (reader.read/writer.write).
 ///
-/// 协议库（pgz / myzql / nats）在 fiber 内调用 reader.read()，
-/// 无数据时通过 fiber yield 挂起，RingSharedClient.on_data → feed() → fiber resume。
-/// 全程跑在 IO 线程，零锁，零 worker 线程。
+/// Protocol libraries (pgz / myzql / nats) call reader.read() inside a fiber;
+/// with no data available they suspend via fiber yield, then RingSharedClient.on_data → feed() → fiber resume.
+/// Runs entirely on the IO thread: zero locks, zero worker threads.
 pub const Pipe = struct {
     allocator: Allocator,
     stream: *RingSharedClient,
@@ -47,18 +47,18 @@ pub const Pipe = struct {
         return Writer{ .pipe = self };
     }
 
-    /// RingSharedClient.on_data 回调入口。
-    /// 超出 max_read 时拒绝数据、唤醒 fiber 报错。
+    /// Entry point for the RingSharedClient.on_data callback.
+    /// Rejects data and wakes the fiber with an error when max_read is exceeded.
     pub fn feed(self: *Pipe, data: []const u8) !void {
         if (self.read_buf.items.len + data.len > self.max_read) {
-            // 修改原因：读缓冲溢出不能静默返回成功，否则上层会继续复用已经缺字节的连接。
+            // Defensive: a read-buffer overflow must not silently return success, otherwise the upper layer keeps reusing a connection that is already missing bytes.
             if (Fiber.isYielded()) {
                 Fiber.pushResume(0, 0, &.{});
             }
             return error.BufferFull;
         }
         self.read_buf.appendSlice(self.allocator, data) catch |err| {
-            // 修改原因：append OOM 时也要唤醒正在 reader.read() 里等待的 fiber，否则请求会一直挂起。
+            // Defensive: on append OOM, the fiber waiting in reader.read() must still be woken, otherwise the request hangs forever.
             if (Fiber.isYielded()) {
                 Fiber.pushResume(0, 0, &.{});
             }
@@ -69,14 +69,14 @@ pub const Pipe = struct {
         }
     }
 
-    /// 冲刷写缓冲区到 RingSharedClient
+    /// Flush the write buffer to RingSharedClient
     pub fn flushWrite(self: *Pipe) !void {
         if (self.write_buf.items.len == 0) return;
         try self.stream.write(self.write_buf.items);
         self.write_buf.clearRetainingCapacity();
     }
 
-    /// 重置所有缓冲区（连接断开/重连时调用）
+    /// Reset all buffers (called on disconnect/reconnect)
     pub fn reset(self: *Pipe) void {
         self.read_buf.clearRetainingCapacity();
         self.write_buf.clearRetainingCapacity();
@@ -87,7 +87,7 @@ pub const Pipe = struct {
         pipe: *Pipe,
 
         pub fn read(self: Reader, dest: []u8) !usize {
-            // 修改原因：零长度读取按 Reader 语义应立即返回 0，不能进入 yield 后在无数据时误报 Closed。
+            // Defensive: a zero-length read should return 0 immediately per Reader semantics; it must not yield and then misreport Closed when no data arrives.
             if (dest.len == 0) return 0;
             if (self.pipe.read_buf.items.len > 0) {
                 const n = @min(dest.len, self.pipe.read_buf.items.len);
@@ -95,9 +95,9 @@ pub const Pipe = struct {
                 try self.pipe.read_buf.replaceRange(self.pipe.allocator, 0, n, &.{});
                 return n;
             }
-            // 无数据 → yield fiber，等 RingSharedClient feed() 唤醒
+            // no data → yield the fiber, wait for RingSharedClient feed() to wake it
             Fiber.currentYield();
-            // 醒来后缓冲区必有数据（feed 已填充）
+            // on wake the buffer must have data (feed already filled it)
             if (self.pipe.read_buf.items.len == 0) return error.Closed;
             const n = @min(dest.len, self.pipe.read_buf.items.len);
             @memcpy(dest[0..n], self.pipe.read_buf.items[0..n]);
@@ -105,7 +105,7 @@ pub const Pipe = struct {
             return n;
         }
 
-        /// 读满 dest，否则 yield 等待
+        /// Fill dest completely, otherwise yield and wait
         pub fn readAll(self: Reader, dest: []u8) !void {
             var offset: usize = 0;
             while (offset < dest.len) {

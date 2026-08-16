@@ -14,8 +14,8 @@ pub fn parseFrame(data: []u8) !Frame {
     const mask = (second_byte & 0x80) != 0;
     var payload_len: u64 = @intCast(second_byte & 0x7F);
 
-    // 修改原因：服务端解析客户端帧时必须拒绝未协商扩展的 RSV 位和未 masked 的帧，
-    // 否则会接受违反 RFC 6455 的输入并把协议错误交给后续业务路径处理。
+    // The server must reject RSV bits for unnegotiated extensions and unmasked frames when parsing client frames,
+    // otherwise it would accept RFC 6455-violating input and pass the protocol error to the later business path.
     if (rsv != 0 or !mask) return error.InvalidFrame;
 
     var offset: usize = 2;
@@ -23,7 +23,7 @@ pub fn parseFrame(data: []u8) !Frame {
     if (payload_len == 126) {
         if (data.len < 4) return error.IncompleteFrame;
         payload_len = std.mem.readInt(u16, data[2..4], .big);
-        // 修改原因：RFC 6455 要求 payload length 使用最短编码；接受非最短编码会放宽协议边界并绕过长度分支校验。
+        // RFC 6455 requires the payload length to use its minimal encoding; accepting non-minimal encodings would relax the protocol boundary and bypass the length-branch check.
         if (payload_len < 126) return error.InvalidFrame;
         offset = 4;
     } else if (payload_len == 127) {
@@ -34,8 +34,8 @@ pub fn parseFrame(data: []u8) !Frame {
         offset = 10;
     }
 
-    // 修改原因：控制帧按协议不能分片，payload 也不能超过 125 字节；
-    // 提前拒绝可避免 ping/close 响应路径为非法长度分配或写帧失败。
+    // Control frames must not be fragmented per the protocol, and their payload cannot exceed 125 bytes;
+    // rejecting early avoids the ping/close response path allocating for an invalid length or failing to write the frame.
     switch (opcode) {
         .close, .ping, .pong => if (!fin or payload_len > 125) return error.InvalidFrame,
         else => {},
@@ -43,13 +43,13 @@ pub fn parseFrame(data: []u8) !Frame {
     switch (opcode) {
         .continuation => return error.InvalidFrame,
         .text, .binary => {
-            // 修改原因：当前服务器没有维护 WebSocket 分片消息状态；接受 FIN=0 会把半条消息直接交给业务 handler。
+            // The server does not maintain WebSocket fragmented-message state; accepting FIN=0 would hand a half-message directly to the business handler.
             if (!fin) return error.InvalidFrame;
         },
         else => {},
     }
     if (opcode == .close and payload_len == 1) {
-        // 修改原因：Close 帧 payload 要么为空，要么至少包含 2 字节状态码；1 字节会让关闭原因解析半截数据。
+        // A Close frame payload is either empty or at least 2 bytes for the status code; 1 byte would make close-reason parsing read half of the data.
         return error.InvalidFrame;
     }
 
@@ -70,7 +70,7 @@ pub fn parseFrame(data: []u8) !Frame {
     }
     if (opcode == .close and payload.len >= 2) {
         const code = std.mem.readInt(u16, payload[0..2], .big);
-        // 修改原因：Close 帧状态码有保留区间；未校验会把非法关闭原因交给业务层，破坏 WebSocket 协议边界。
+        // Close frame status codes have reserved ranges; not validating would hand an illegal close reason to the business layer and break the WebSocket protocol boundary.
         if (!isValidCloseCode(code)) return error.InvalidFrame;
     }
 
@@ -169,7 +169,7 @@ pub fn frameSize(payload_len: usize) usize {
 fn validateOutboundFrame(frame: Frame) !void {
     switch (frame.opcode) {
         .close, .ping, .pong => {
-            // 修改原因：服务端生成控制帧时也必须遵守 RFC 6455；否则应用层可发出过长 ping/pong 或非法 close payload。
+            // The server must also follow RFC 6455 when generating control frames; otherwise the application layer could send overlong ping/pong or an illegal close payload.
             if (!frame.fin or frame.payload.len > 125) return error.InvalidFrame;
             if (frame.opcode == .close) {
                 if (frame.payload.len == 1) return error.InvalidFrame;
@@ -212,8 +212,8 @@ pub fn writeFrame(buf: []u8, frame: Frame) !usize {
     return total;
 }
 
-/// SIMD 加速 WebSocket 掩码计算。
-/// 将 4 字节 mask_key 复制为 16 字节向量，16 字节/轮 XOR。
+/// SIMD-accelerated WebSocket masking.
+/// Replicates the 4-byte mask_key into a 16-byte vector and XORs 16 bytes per round.
 fn maskPayload(payload: []u8, mask_key: [4]u8) void {
     const Vec = @Vector(16, u8);
     const mask_vec: Vec = [_]u8{

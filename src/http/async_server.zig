@@ -73,7 +73,7 @@ const DeferredNode = hook_system.DeferredNode;
 const deferredRespond = hook_system.deferredRespond;
 
 fn listenSocketFd(raw_fd: usize) !i32 {
-    // 修改原因：listen socket 创建失败时 linux.socket 返回 errno 编码的 usize，先 @intCast 可能在安全构建中直接失败。
+    // On listen-socket creation failure linux.socket returns an errno-encoded usize; casting first could fail outright in safe builds.
     if (linux.errno(raw_fd) != .SUCCESS) return error.SocketCreationFailed;
     return @intCast(raw_fd);
 }
@@ -98,7 +98,7 @@ pub const AsyncServer = struct {
 
     should_stop: bool = false,
     buffer_pool: BufferPool,
-    /// 大报文专用缓冲池（每块 1MB），content_length > 32KB 时触发
+    /// Dedicated pool for large bodies (1MB per block), used when content_length > 32KB.
     large_pool: LargeBufferPool(64),
 
     /// Set when submitAccept fails; cleared on successful submission.
@@ -133,44 +133,44 @@ pub const AsyncServer = struct {
     timeout_user_data: u64 = 0,
     timeout_ts: linux.kernel_timespec = .{ .sec = 1, .nsec = 0 },
 
-    /// sticker TTL 增量扫描游标
+    /// Cursor for the sticker TTL incremental scan.
     ttl_scan_cursor: u32 = 0,
     ttl_scan_out: std.ArrayList(u32),
 
     cfg: Config,
 
-    /// 通用跨线程 IO 回调队列 (在 RingShared 内)
-    /// 钩子列表：在 deferred 响应发送前依次调用（IO 线程内执行）
+    /// Generic cross-thread IO callback queue (inside RingShared).
+    /// Hook list: invoked in order before a deferred response is sent (runs on the IO thread).
     deferred_hooks: std.ArrayList(*const fn (self: *Self, node: *DeferredNode) void),
-    /// tick 钩子列表：每轮 IO 循环必触发（有/无 deferred 节点都跑）
+    /// Tick hook list: fires every IO loop iteration (with or without deferred nodes).
     tick_hooks: std.ArrayList(*const fn (self: *Self) void),
 
-    /// 客户端出站连接注册表（io_uring TCP client）
+    /// Registry for outbound client connections (io_uring TCP client).
     io_registry: IORegistry,
 
-    /// 注入的 ring 共享资源（DNS / Client / ... 均等使用）
+    /// Injected shared ring resources (shared equally by DNS / Client / ...).
     rs: RingShared,
 
-    /// IO 线程已绑核标记
+    /// Flag indicating the IO thread has been pinned to a core.
     io_pinned: bool = false,
 
-    /// DNS 解析器 (io_uring 异步 UDP DNS)
+    /// DNS resolver (io_uring async UDP DNS).
     dns_resolver: *DnsResolver,
 
-    /// HTTP 请求 fiber 执行器
+    /// HTTP request fiber executor.
     next: ?Next = null,
-    /// 用户自定义队列注册表
+    /// Registry for user-defined submit queues.
     submit_registry: SubmitQueueRegistry,
 
-    /// 高频对象内存池，消除 per-request alloc
+    /// Memory pool for high-frequency objects, eliminating per-request allocations.
     http_ctx_pool: std.heap.MemoryPool(HttpTaskCtx),
     ws_ctx_pool: std.heap.MemoryPool(WsTaskCtx),
-    /// 预分配的 fiber 共享栈（单 IO 线程串行复用）
+    /// Pre-allocated shared fiber stack (reused serially by a single IO thread).
     shared_fiber_stack: []u8,
-    /// 标记共享栈是否有活跃的 fiber（保护 yield 场景下的栈安全）
+    /// Marks whether the shared stack has an active fiber (protects stack safety across yields).
     shared_fiber_active: bool = false,
 
-    /// SQ ring 溢出时暂存的写请求 (1M broadcast 场景的背压机制)
+    /// Writes buffered when the SQ ring overflows (backpressure for the 1M broadcast scenario).
     pending_writes: std.ArrayList(u64),
 
     tls_config: ?TlsConfig = null,
@@ -270,8 +270,8 @@ pub const AsyncServer = struct {
         if (rc_listen != 0) return error.ListenFailed;
 
         var params = std.mem.zeroes(linux.io_uring_params);
-        // 修改原因：示例会把 server 交给专用 IO 线程 run，SINGLE_ISSUER 会让 Linux 返回 InvalidThread。
-        // 同时 Zig 0.16 的 IoUring.init_params 要求 sq_entries/cq_entries 由 entries 参数推导，不能手动预填。
+        // The server is handed to a dedicated IO thread via run(); SINGLE_ISSUER makes Linux return InvalidThread.
+        // Zig 0.16's IoUring.init_params also derives sq_entries/cq_entries from the entries argument, so they cannot be pre-filled manually.
         var ring = linux.IoUring.init_params(RING_ENTRIES, &params) catch blk: {
             break :blk try linux.IoUring.init(RING_ENTRIES, 0);
         };
@@ -390,7 +390,7 @@ pub const AsyncServer = struct {
 
         try server.buffer_pool.provideAllReads(&server.ring);
 
-        // 预分配内存池，消除冷启动时的动态分配
+        // Pre-allocate the memory pools to eliminate dynamic allocation on cold start.
         try server.http_ctx_pool.addCapacity(allocator, 64);
         try server.ws_ctx_pool.addCapacity(allocator, 64);
 
@@ -445,7 +445,7 @@ pub const AsyncServer = struct {
                     if (slot.line3.pending_buffer_ptr != 0) {
                         const hw = sticker.httpWork(slot);
                         const saved: []u8 = @as([*]u8, @ptrFromInt(slot.line3.pending_buffer_ptr))[0..hw.header_len];
-                        // 修改原因：服务器退出时也要释放等待 body 的跨分片 header 副本，避免 deinit 路径泄漏。
+                        // On shutdown, also free the cross-fragment header copy awaiting body, avoiding a leak on the deinit path.
                         self.allocator.free(saved);
                         slot.line3.pending_buffer_ptr = 0;
                         hw.header_len = 0;
@@ -470,7 +470,7 @@ pub const AsyncServer = struct {
         if (self.user_map) |*um| um.deinit();
         self.deferred_hooks.deinit(self.allocator);
         self.tick_hooks.deinit(self.allocator);
-        // 修改原因：DnsResolver.deinit 会从 io_registry 中移除 dns_ud，必须早于 io_registry.deinit，否则 ReleaseFast 退出会访问已释放的 hashmap。
+        // DnsResolver.deinit removes dns_ud from io_registry and must run before io_registry.deinit, or a ReleaseFast exit would touch the freed hashmap.
         self.dns_resolver.deinit();
         self.allocator.destroy(self.dns_resolver);
         self.io_registry.deinit();
@@ -506,12 +506,12 @@ pub const AsyncServer = struct {
         self.cfg = undefined;
     }
 
-    /// 注册中间件，在 fiber 中执行。可用 Next.submit() 卸 CPU 重活。
+    /// Register middleware to run in a fiber. Use Next.submit() to offload CPU-heavy work.
     pub fn use(self: *Self, pattern: []const u8, middleware: Middleware) !void {
         return http_routing.use(self, pattern, middleware);
     }
 
-    /// 注册快速中间件，在 IO 线程内联执行。⚠️ 不可阻塞。
+    /// Register fast middleware that runs inline on the IO thread. Must not block.
     pub fn useThenRespondImmediately(self: *Self, pattern: []const u8, middleware: Middleware) !void {
         return http_routing.useThenRespondImmediately(self, pattern, middleware);
     }

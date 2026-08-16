@@ -11,22 +11,22 @@ pub const FiberCall = struct {
 threadlocal var active_call: ?FiberCall = null;
 threadlocal var caller_context: ?*IoFiber.Context = null;
 
-/// 当前正在执行的 fiber context，供 Pipe 等组件 yield 使用
+/// The currently executing fiber context, used by components like Pipe for yield
 threadlocal var current_context: ?*IoFiber.Context = null;
 
-/// ── yield/resume 状态 ──
+/// ── yield/resume state ──
 threadlocal var yielded_fiber: ?*IoFiber.Context = null;
 threadlocal var yielded_result: ?[]const u8 = null;
 pub threadlocal var saved_call: ?FiberCall = null;
 threadlocal var yield_seq: u64 = 0;
 
-/// ── worker 线程 parking 状态（transient，fiber.exec 返回后由 workerLoop 读取） ──
+/// ── worker thread parking state (transient; read by workerLoop after fiber.exec returns) ──
 pub threadlocal var parked_ctx: ?*IoFiber.Context = null;
 pub threadlocal var parked_call: ?FiberCall = null;
 pub threadlocal var parked_poll: ?*const fn (*anyopaque) bool = null;
 pub threadlocal var parked_poll_ctx: ?*anyopaque = null;
 
-/// ── yield 清理回调：fiber 完全完成（resume 后未再 yield）时调用 ──
+/// ── yield cleanup callback: invoked when the fiber fully completes (resumed and did not yield again) ──
 pub const YieldCleanup = struct {
     data: *anyopaque,
     free_fn: *const fn (*anyopaque) void,
@@ -47,7 +47,7 @@ pub const Fiber = struct {
 
     pub fn init(stack: []u8) Fiber {
         const sp = @intFromPtr(stack.ptr + stack.len);
-        // 修改原因：x86_64 通过 jmp 进入 trampoline，没有 call 压入返回地址，rsp 需模拟 ABI 的 -8 对齐。
+        // Defensive: x86_64 enters the trampoline via jmp (no call pushes a return address), so rsp must emulate the ABI's -8 alignment.
         const aligned_sp = (sp & ~@as(u64, 15)) - 8;
         return .{
             .context = .{
@@ -86,8 +86,8 @@ pub const Fiber = struct {
         _ = IoFiber.contextSwitch(&.{ .old = &tmp, .new = caller_context.? });
     }
 
-    /// 延迟恢复队列：CQE 处理期间不直接 resume，而是入队后由主循环统一恢复。
-    /// 队列存储 slot_idx 用于 resume 前对 workspace 做 prefetch。
+    /// Deferred resume queue: during CQE processing fibers are not resumed directly; they are enqueued and resumed in batch by the main loop.
+    /// The queue stores slot_idx so the workspace can be prefetched before resume.
     pub const ResumeEntry = struct {
         slot_idx: u32,
         gen_id: u32,
@@ -160,8 +160,8 @@ pub const Fiber = struct {
         return yielded_fiber != null;
     }
 
-    /// Worker fiber 内调用：yield 当前 fiber，注册 poll 回调。
-    /// worker 线程的 tick 里周期调 pollFn，返回 true 时 resume 本 fiber。
+    /// Called inside a worker fiber: yields the current fiber and registers a poll callback.
+    /// The worker thread's tick periodically calls pollFn; when it returns true this fiber is resumed.
     pub fn workerYield(pollFn: *const fn (*anyopaque) bool, pollCtx: *anyopaque) void {
         parked_poll = pollFn;
         parked_poll_ctx = pollCtx;
@@ -170,29 +170,29 @@ pub const Fiber = struct {
         parked_call = saved_call;
     }
 
-    /// Worker 线程 tick 调用：resume 一个已保存的 fiber context
+    /// Called from the worker thread's tick: resumes a saved fiber context
     pub fn resumeContext(ctx: *IoFiber.Context) void {
         yielded_fiber = ctx;
         // saved_call should already be set by the caller or stored alongside
         resumeYielded("");
     }
 
-    /// DNS resolver 在 IO 线程上使用的 fiber yield/resume 槽位。
+    /// Fiber yield/resume slot used by the DNS resolver on the IO thread.
     pub const DnsYieldSlot = struct {
         ctx: IoFiber.Context,
         call: FiberCall,
     };
 
-    /// DNS resolver: 挂起当前 fiber，将状态保存到 slot.ctx 中。
-    /// 上下文会切换回 caller_context（exec 设置的调用者）。
-    /// 调用者必须在 dnsYield 返回后立即将控制权交还给 IO 事件循环。
+    /// DNS resolver: suspends the current fiber and saves its state into slot.ctx.
+    /// Context switches back to caller_context (the caller set by exec).
+    /// The caller must hand control back to the IO event loop immediately after dnsYield returns.
     pub fn dnsYield(slot: *DnsYieldSlot) void {
         slot.call = active_call.?;
         _ = IoFiber.contextSwitch(&.{ .old = &slot.ctx, .new = caller_context.? });
     }
 
-    /// DNS resolver CQE handler: 恢复由 dnsYield 挂起的 fiber。
-    /// dnsYield 直接保存寄存器状态到 slot.ctx，故可跨 exec 栈帧安全恢复。
+    /// DNS resolver CQE handler: resumes the fiber suspended by dnsYield.
+    /// dnsYield saves register state directly into slot.ctx, so it can be safely resumed across exec stack frames.
     pub fn dnsResume(slot: *const DnsYieldSlot) void {
         saved_call = slot.call;
         active_call = slot.call;

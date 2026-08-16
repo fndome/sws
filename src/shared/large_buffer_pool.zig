@@ -2,26 +2,26 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const logErr = @import("../async_logger.zig").logErr;
 
-/// ── 通用块缓冲池 ────────────────────────────────────────
+/// ── Generic block buffer pool ────────────────────────────────────────
 ///
-/// 预分配 N 块, 每块 block_size 字节。O(1) acquire/release, freelist 驱动。
-/// 用于 IM 的大 JSON、文件 I/O、数据库结果集等 — 任何需要确定性内存的场景。
+/// Pre-allocates N blocks, each block_size bytes. O(1) acquire/release, driven by a freelist.
+/// For large IM JSON, file I/O, database result sets, etc. — any scenario needing deterministic memory.
 ///
-/// IO 线程独占，无并发访问 — 不需要原子操作。
+/// Owned exclusively by the IO thread with no concurrent access — no atomics needed.
 ///
-/// 用法:
+/// Usage:
 ///   var pool = try BufferBlockPool(65536, 32).init(alloc); // 32 × 64KB
 ///   const buf = pool.acquire() orelse return error.OutOfBlocks;
 ///   defer pool.release(buf);
-///   // io_uring read/write CQE 直接写 buf.ptr
+///   // io_uring read/write CQEs write directly to buf.ptr
 ///
-/// release() 是 O(n) 指针扫描, 适合 块数 <= 64 的场景。
-/// 需要更大池子用 std.heap.MemoryPool 或 arena allocator。
+/// release() is an O(n) pointer scan, suitable for pools with <= 64 blocks.
+/// For larger pools use std.heap.MemoryPool or an arena allocator.
 ///
-/// 状态机 (per-block) 防御同一 buffer 被 release 两次:
+/// Per-block state machine defends against releasing the same buffer twice:
 ///   0 = IDLE (free)
 ///   1 = BUSY (acquired, in-flight)
-/// release() 检查当前状态: BUSY → IDLE + 归还; IDLE → 双重释放, log + skip。
+/// release() checks the current state: BUSY → IDLE + return; IDLE → double free, log + skip.
 pub fn BufferBlockPool(comptime block_size: usize, comptime capacity: usize) type {
     return struct {
         const Self = @This();
@@ -72,9 +72,9 @@ pub fn BufferBlockPool(comptime block_size: usize, comptime capacity: usize) typ
             return self.blocks[idx];
         }
 
-        /// 幂等释放：检查当前状态。BUSY → IDLE + 归还 freelist。
-        /// 若已是 IDLE → 双重释放，记录错误并跳过。
-        /// IO 线程独占，无并发 — 不需要 CAS。
+        /// Idempotent release: checks the current state. BUSY → IDLE + return to the freelist.
+        /// If already IDLE → double free, log an error and skip.
+        /// Owned exclusively by the IO thread with no concurrency — no CAS needed.
         pub fn release(self: *Self, buf: []u8) void {
             for (self.blocks[0..self.count], 0..) |block, i| {
                 if (block.ptr == buf.ptr) {
@@ -93,7 +93,7 @@ pub fn BufferBlockPool(comptime block_size: usize, comptime capacity: usize) typ
     };
 }
 
-/// 向后兼容: 1MB × N 块, 用于大报文 (Content-Length > 32KB)
+/// Backward-compatible: 1MB × N blocks, for large messages (Content-Length > 32KB)
 pub fn LargeBufferPool(comptime capacity: usize) type {
     return BufferBlockPool(1024 * 1024, capacity);
 }

@@ -74,11 +74,11 @@ fn appendPreciseMiddleware(allocator: Allocator, precise: *std.StringHashMap(std
         owned_key = null;
     }
 
-    // 修改原因：getOrPut 新插入 key 后 append 仍可能失败，失败时必须回滚 map，避免残留已释放 key。
+    // After getOrPut inserts a new key, append can still fail; on failure the map must be rolled back to avoid a dangling freed key.
     try gop.value_ptr.append(allocator, middleware);
 }
 
-/// 注册中间件，在 fiber 中执行。可用 Next.submit() 卸 CPU 重活。
+/// Register middleware to run in a fiber. Use Next.submit() to offload CPU-heavy work.
 pub fn use(self: *AsyncServer, pattern: []const u8, middleware: Middleware) !void {
     try ensureNext(self);
 
@@ -118,7 +118,7 @@ pub fn use(self: *AsyncServer, pattern: []const u8, middleware: Middleware) !voi
     });
 }
 
-/// 注册快速中间件，在 IO 线程内联执行。⚠️ 不可阻塞。
+/// Register fast middleware that runs inline on the IO thread. Must not block.
 pub fn useThenRespondImmediately(self: *AsyncServer, pattern: []const u8, middleware: Middleware) !void {
     if (pattern.len == 0 or (pattern.len == 1 and pattern[0] == '/')) {
         return error.InvalidPattern;
@@ -223,7 +223,7 @@ pub fn processBodyRequest(self: *AsyncServer, conn_id: u64, conn: *Connection, b
                 const header_len: usize = hw.header_len;
                 const saved = @as([*]u8, @ptrFromInt(s.line3.pending_buffer_ptr))[0..header_len];
                 s.line3.pending_buffer_ptr = 0;
-                // 修改原因：跨分片 header 进入异步 body 读取前会被复制到堆上；这里接管所有权，确保路由看到完整请求行。
+                // The cross-fragment header is copied to the heap before async body reads; take ownership here so routing sees the full request line.
                 owned_request_data = saved;
                 break :blk saved;
             }
@@ -244,7 +244,7 @@ pub fn processBodyRequest(self: *AsyncServer, conn_id: u64, conn: *Connection, b
         effective_buf,
         @as(usize, @intCast(self.cfg.max_path_length)),
     ) orelse {
-        // 修改原因：大 body 完整读取后也必须使用配置的 max_path_length，不能退回默认常量或忽略限制。
+        // After a large body is fully read, the configured max_path_length must still apply — do not fall back to the default constant or ignore the limit.
         self.buffer_pool.markReplenish(bid);
         self.large_pool.release(body_buf);
         conn.read_len = 0;
@@ -312,7 +312,7 @@ pub fn processBodyRequest(self: *AsyncServer, conn_id: u64, conn: *Connection, b
             }
         }
 
-        // 修改原因：当前 path 未命中快速中间件时要继续走普通 handler，不能提前返回空 200。
+        // When the current path misses the fast middleware, fall through to the normal handler instead of returning an early empty 200.
         if (matched_respond_middleware) {
             self.large_pool.release(body_buf);
             self.buffer_pool.markReplenish(bid);
@@ -405,7 +405,7 @@ pub fn processBodyRequest(self: *AsyncServer, conn_id: u64, conn: *Connection, b
                 if (n.push(HttpTaskCtx, t.*, httpTaskExecWrapperWithOwnership, self.cfg.fiber_stack_size_kb * 1024)) {
                     self.http_ctx_pool.destroy(t);
                 } else {
-                    // 修改原因：入队失败时必须释放 body_buf/read buffer，避免大块池泄漏。
+                    // On enqueue failure the body_buf/read buffer must be released to avoid leaking a large-pool block.
                     http_fiber.httpTaskCleanup(t);
                     self.respond(conn, 503, "Service Unavailable");
                 }

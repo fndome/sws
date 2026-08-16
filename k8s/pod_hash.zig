@@ -1,15 +1,15 @@
-// pod_hash.zig — Pod 侧一致性哈希路由
+// pod_hash.zig — Pod-side consistent hash routing
 //
-// 与 im-router (Go) 算法完全一致: FNV-1a + 150 vnodes + 二分查找
+// Identical to the im-router (Go) algorithm: FNV-1a + 150 vnodes + binary search
 //
-// Pod 用途: 消息转发时确定目标 Pod
+// Pod use case: determine the target Pod when forwarding messages
 //   hash(uid) → target ordinal → K8s DNS "im-ws-{N}.im-ws-headless"
 //   → getaddrinfo(DNS) → Pod IP → TCP connect
 //
-// 用法:
+// Usage:
 //   var ring = HashRing.init(alloc, pod_ordinal);
 //   try ring.addNode(0); try ring.addNode(1); try ring.addNode(2);
-//   // 消息转发
+//   // message forwarding
 //   const target = ring.routeToPod(to_uid, dns_fmt, &dns_buf);
 //   // → ordinal=1, dns="im-ws-1.im-ws-headless"
 
@@ -77,7 +77,7 @@ pub const HashRing = struct {
         sortRing(self.vnodes.items);
     }
 
-    /// 路由: hash(user_id) → 目标节点 ordinal
+    /// Route: hash(user_id) → target node ordinal
     pub fn route(self: *const Self, user_id: u64) ?u8 {
         if (self.vnodes.items.len == 0) return null;
         const h = hash64(user_id);
@@ -86,17 +86,17 @@ pub const HashRing = struct {
         return self.vnodes.items[pos].node_id;
     }
 
-    /// 是否路由到本 Pod
+    /// Whether the route lands on this Pod
     pub fn isLocal(self: *const Self, user_id: u64) bool {
         if (self.route(user_id)) |n| return n == self.local_ordinal;
         return false;
     }
 
-    /// ── Pod 专用: hash → ordinal + K8s DNS ────────────────
+    /// ── Pod-specific: hash → ordinal + K8s DNS ────────────────
     ///
-    /// dns_fmt 例: "im-ws-{d}.im-ws-headless"
-    /// 返回目标 ordinal 和拼好的 DNS 名字
-    /// 调用方: resolve DNS → getaddrinfo → Pod IP → connect
+    /// dns_fmt example: "im-ws-{d}.im-ws-headless"
+    /// Returns the target ordinal and the assembled DNS name
+    /// Caller: resolve DNS → getaddrinfo → Pod IP → connect
     pub fn routeToPod(
         self: *const Self,
         user_id: u64,
@@ -114,8 +114,8 @@ pub const HashRing = struct {
     };
 };
 
-/// K8s DNS 名字如 "im-ws-1.im-ws-headless"
-/// Pod 拿到后: std.c.getaddrinfo(dns, null, ...) → sockaddr.in → linux.connect()
+/// K8s DNS name such as "im-ws-1.im-ws-headless"
+/// Once the Pod gets it: std.c.getaddrinfo(dns, null, ...) → sockaddr.in → linux.connect()
 
 fn vnodeSeed(node_id: u8, vi: u16) []u8 {
     const s = std.fmt.bufPrint(&seed_buf, "{d}-{d}", .{ node_id, vi }) catch unreachable;
@@ -165,7 +165,7 @@ fn hash64(v: u64) u64 {
     return h;
 }
 
-// ── 测试 ──────────────────────────────────────────────────────
+// ── Tests ──────────────────────────────────────────────────────
 
 test "pod: route to DNS" {
     const alloc = std.testing.allocator;

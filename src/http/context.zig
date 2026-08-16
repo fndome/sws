@@ -17,7 +17,7 @@ fn isManagedResponseHeader(key: []const u8) bool {
 }
 
 fn validateResponseHeader(key: []const u8, value: []const u8) !void {
-    // 修改原因：setHeader 会直接序列化到响应头，必须拒绝非法名字、CR/LF 和框架自动生成的头，避免注入与重复边界头。
+    // setHeader serializes directly into response headers, so it must reject invalid names, CR/LF, and framework-generated headers to avoid injection and duplicate boundary headers.
     if (key.len == 0) return error.InvalidHeader;
     for (key) |ch| {
         if (!isHeaderNameChar(ch)) return error.InvalidHeader;
@@ -34,7 +34,7 @@ pub const Context = struct {
     pub const ContentType = enum { plain, json, html };
 
     request_data: []const u8,
-    // 修改原因：请求体不能复用 response body 字段，否则 POST 会被误判为已响应。
+    // The request body must not reuse the response body field, or POST would be misjudged as already responded.
     request_body: []const u8 = "",
     path: []const u8,
     app_ctx: ?*anyopaque,
@@ -113,21 +113,21 @@ pub const Context = struct {
             if (std.ascii.startsWithIgnoreCase(line, header_name)) {
                 if (line.len <= header_name.len) return null;
                 const after = line[header_name.len..];
-                // 修改原因：同时支持 CRLF/LF-only 请求头，但仍要求 header 名后紧跟冒号，避免 Host 误匹配 Hostile。
+                // Support both CRLF and LF-only request headers, but still require a colon immediately after the header name so Host does not mismatch Hostile.
                 if (after[0] == ':') return std.mem.trim(u8, after[1..], " \t\r\n");
             }
         }
         return null;
     }
 
-    /// 从请求 path 的 query string 中提取指定参数值。e.g. ctx.query("to")
+    /// Extract a parameter value from the query string of the request path, e.g. ctx.query("to").
     pub fn query(self: *Context, name: []const u8) ?[]const u8 {
         const line_end = std.mem.indexOf(u8, self.request_data, "\r\n") orelse
             std.mem.indexOfScalar(u8, self.request_data, '\n') orelse
             self.request_data.len;
         const first_line = self.request_data[0..line_end];
         const method_end = std.mem.indexOfScalar(u8, first_line, ' ') orelse return null;
-        // 修改原因：旧代码把 first_line 截到第一个空格，只剩 method，导致 query 永远取不到。
+        // Old code truncated first_line at the first space, leaving only the method, so query never matched.
         const uri_part = std.mem.trimStart(u8, first_line[method_end + 1 ..], " ");
         const uri = uri_part[0..(std.mem.indexOfScalar(u8, uri_part, ' ') orelse uri_part.len)];
 
@@ -152,8 +152,8 @@ pub const Context = struct {
         return null;
     }
 
-    /// 获取 POST/PUT/PATCH 请求体。
-    /// 自动从 Content-Length 取长度。无 body 返回空串。
+    /// Get the POST/PUT/PATCH request body.
+    /// Takes the length from Content-Length automatically; returns an empty string when there is no body.
     pub fn requestBody(self: *Context) []const u8 {
         if (self.request_body.len > 0) return self.request_body;
         const header_end = std.mem.indexOf(u8, self.request_data, "\r\n\r\n") orelse
@@ -164,9 +164,9 @@ pub const Context = struct {
         if (start >= self.request_data.len) return "";
 
         if (self.getHeader("Content-Length:")) |raw_cl| {
-            // 修改原因：Content-Length 缺失和显式 0 不能都当成 0；显式 0 必须返回空 body。
+            // Missing Content-Length and an explicit 0 are not the same; an explicit 0 must return an empty body.
             const cl = std.fmt.parseInt(usize, raw_cl, 10) catch return "";
-            // 修改原因：恶意超大 Content-Length 不能让 start + cl 溢出；只返回当前已缓存的数据窗口。
+            // A maliciously huge Content-Length must not overflow start + cl; return only the currently buffered data window.
             const available = self.request_data.len - start;
             const body_len = @min(cl, available);
             const end = start + body_len;
@@ -175,7 +175,7 @@ pub const Context = struct {
         return self.request_data[start..];
     }
 
-    /// 解析请求头方法（GET/POST/PUT/...）
+    /// Parse the request method (GET/POST/PUT/...).
     pub fn method(self: *Context) []const u8 {
         const eol = std.mem.indexOf(u8, self.request_data, "\r\n") orelse
             std.mem.indexOfScalar(u8, self.request_data, '\n') orelse
@@ -184,23 +184,23 @@ pub const Context = struct {
         return self.request_data[0..first_sp];
     }
 
-    /// 解析 Content-Length（未声明返回 0）
+    /// Parse Content-Length (returns 0 when not declared).
     pub fn getContentLength(self: *Context) usize {
         const val = self.getHeader("Content-Length:") orelse return 0;
         return std.fmt.parseInt(usize, val, 10) catch 0;
     }
 
-    /// 解析 Content-Type，返回 MIME type（不含参数，如 "application/json"）
+    /// Parse Content-Type, returning the MIME type (without parameters, e.g. "application/json").
     pub fn getContentType(self: *Context) []const u8 {
         const raw = self.getHeader("Content-Type:") orelse return "";
         const semi = std.mem.indexOfScalar(u8, raw, ';') orelse raw.len;
         return std.mem.trim(u8, raw[0..semi], " \t\r\n");
     }
 
-    /// 判断 Content-Type 是否为 JSON
+    /// Check whether Content-Type is JSON.
     pub fn isJson(self: *Context) bool {
         const ct = self.getContentType();
-        // 修改原因：HTTP Content-Type 的 type/subtype 大小写不敏感。
+        // HTTP Content-Type type/subtype is case-insensitive.
         return std.ascii.eqlIgnoreCase(ct, "application/json");
     }
 

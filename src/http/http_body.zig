@@ -35,7 +35,7 @@ fn closeInvalidBodyRead(self: *AsyncServer, conn_id: u64, conn: *Connection, slo
 }
 
 pub fn submitBodyRead(self: *AsyncServer, conn: *Connection, large_buf: []u8, slot: *StackSlot) !void {
-    // 修改原因：异常 CQE 或状态错乱可能让 offset 超过目标 body 长度，先校验可避免 u32/usize 下溢和切片越界。
+    // A stray CQE or inconsistent state can push offset past the target body length; validating first avoids u32/usize underflow and slice OOB.
     const window = bodyReadWindow(slot, large_buf.len) orelse return error.InvalidBodyOffset;
     if (window.remaining == 0) return;
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
@@ -75,7 +75,7 @@ pub fn onBodyChunk(self: *AsyncServer, conn_id: u64, res: i32) void {
             closeInvalidBodyRead(self, conn_id, conn, slot, true);
             return;
         };
-        // 修改原因：流式 body 的 CQE 长度必须落在本次剩余窗口内，否则 feed 前的切片会越界。
+        // The streaming body's CQE length must fit within the remaining window, or the slice before feed would go OOB.
         if (n > window.remaining) {
             closeInvalidBodyRead(self, conn_id, conn, slot, true);
             return;
@@ -111,7 +111,7 @@ pub fn onBodyChunk(self: *AsyncServer, conn_id: u64, res: i32) void {
         closeInvalidBodyRead(self, conn_id, conn, slot, false);
         return;
     };
-    // 修改原因：非流式 body 也要拒绝超过剩余 Content-Length 的 CQE，避免 offset 越界后误进入处理流程。
+    // Non-streaming body must also reject CQEs exceeding the remaining Content-Length to avoid an OOB offset slipping into processing.
     if (n > window.remaining) {
         closeInvalidBodyRead(self, conn_id, conn, slot, false);
         return;
@@ -162,7 +162,7 @@ pub fn onStreamRead(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, 
             closeInvalidBodyRead(self, conn_id, conn, slot, true);
             return;
         };
-        // 修改原因：无 buffer group 的流式读同样依赖 large_buf_offset，必须先确认 CQE 长度没有越过剩余窗口。
+        // Streaming reads without a buffer group also depend on large_buf_offset, so confirm the CQE length stays within the remaining window first.
         if (n > window.remaining) {
             closeInvalidBodyRead(self, conn_id, conn, slot, true);
             return;

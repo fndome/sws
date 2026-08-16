@@ -33,7 +33,7 @@ fn dnsDispatch(ptr: *anyopaque, user_data: u64, res: i32) void {
 }
 
 fn udpSocketFd(raw_fd: usize) !i32 {
-    // 修改原因：UDP socket 创建失败时 raw_fd 是 errno 编码值，不能先转成 i32 再判断负数。
+    // On UDP socket creation failure raw_fd is an errno-encoded value; it must not be cast to i32 first and then checked for negativity.
     if (linux.errno(raw_fd) != .SUCCESS) return error.UdpSocketFailed;
     return @intCast(raw_fd);
 }
@@ -75,7 +75,7 @@ pub const DnsResolver = struct {
             _ = linux.close(fd);
             return error.BindFailed;
         }
-        // 修改原因：bind 成功后如果后续初始化失败，必须关闭 UDP fd，避免初始化失败路径泄漏 socket。
+        // If later initialization fails after bind, the UDP fd must be closed to avoid leaking the socket on the init failure path.
         errdefer _ = linux.close(fd);
 
         return DnsResolver{
@@ -141,7 +141,7 @@ pub const DnsResolver = struct {
             self.next_txid +%= 1;
             if (self.next_txid == 0) self.next_txid = 1;
             if (txid == 0) continue;
-            // 修改原因：txid 仍在 pending 时不能复用，否则响应会覆盖旧查询并唤醒错误 fiber。
+            // A txid that is still pending must not be reused, or the response would overwrite the old query and wake the wrong fiber.
             if (!self.pending.contains(txid)) return txid;
         }
         return error.DnsTxidExhausted;
@@ -196,7 +196,7 @@ pub const DnsResolver = struct {
             .zero = [_]u8{0} ** 8,
         };
         const send_rc = linux.sendto(self.udp_fd, query_bytes.ptr, query_bytes.len, 0, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
-        // 修改原因：sendto 失败时不能挂起 fiber 等 DNS timeout；需要立即把 UDP 发送错误返回给调用方。
+        // On sendto failure the fiber must not be suspended to wait for the DNS timeout; the UDP send error must be returned to the caller immediately.
         if (linux.errno(send_rc) != .SUCCESS or send_rc != query_bytes.len) return error.DnsSendFailed;
         self.submitRecv();
     }

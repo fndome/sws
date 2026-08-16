@@ -15,8 +15,8 @@ const ParkedTask = struct {
     task: *PoolTask,
     poll_fn: *const fn (*anyopaque) bool,
     poll_ctx: *anyopaque,
-    /// 堆分配的 fiber 栈（64KB），跨 yield 保持存活。
-    /// resume 完成后由 resumeParked 释放。
+    /// Heap-allocated fiber stack (64KB), kept alive across yield.
+    /// Freed by resumeParked after resume completes.
     stack: []u8,
 };
 
@@ -65,7 +65,7 @@ pub const WorkerPool = struct {
         var stack_pool: [STACK_POOL_SIZE][]u8 = undefined;
         var stack_count: usize = 0;
         errdefer {
-            // 修改原因：初始化中途失败时 WorkerPool 还没有交给调用方，已分配的 fiber 栈必须在这里回收。
+            // Defensive: if init fails partway, the WorkerPool has not yet been handed to the caller, so the already-allocated fiber stacks must be reclaimed here.
             for (stack_pool[0..stack_count]) |stack| {
                 allocator.free(stack);
             }
@@ -91,7 +91,7 @@ pub const WorkerPool = struct {
             w.* = std.Thread.spawn(.{}, workerLoop, .{ &pool, @as(u8, @intCast(i)) }) catch {
                 @atomicStore(bool, &pool.stop, true, .release);
                 for (workers[0..i]) |pw| pw.join();
-                // 修改原因：线程创建失败时先收停并 join 已启动线程，再交给 errdefer 统一释放栈和 workers。
+                // Defensive: on thread-spawn failure, signal stop and join the threads already started, then let the errdefer release stacks and workers uniformly.
                 return error.ThreadSpawnFailed;
             };
         }
@@ -183,7 +183,7 @@ pub const WorkerPool = struct {
 
 fn runTask(pool: *WorkerPool, task: *PoolTask, parked: *std.ArrayList(ParkedTask)) void {
     const stack = pool.acquireStack() orelse {
-        task.exec(task.ctx, task.alloc); // 池满退化: 无 fiber 直接跑
+        task.exec(task.ctx, task.alloc); // pool-full fallback: run directly with no fiber
         pool.allocator.destroy(task);
         return;
     };
@@ -258,7 +258,7 @@ fn resumeParked(pool: *WorkerPool, pt: *ParkedTask, parked: *std.ArrayList(Parke
             .task = pt.task,
             .poll_fn = poll,
             .poll_ctx = poll_ctx,
-            .stack = pt.stack, // 栈随任务跨 yield 存活
+            .stack = pt.stack, // stack stays alive across yield with the task
         }) catch {
             // OOM: cannot re-park the fiber. Release stack and task
             // to avoid leaking resources since the poll may never trigger.

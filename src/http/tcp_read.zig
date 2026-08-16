@@ -39,7 +39,7 @@ fn prepareReadSubmission(conn: *Connection) void {
 
 fn resetHttpWorkForRequest(slot: *StackSlot) *HttpWork {
     const hw = sticker.httpWork(slot);
-    // 修改原因：keep-alive 复用同一 slot，Content-Length/path 等元数据必须按请求重置，不能继承上一轮 POST。
+    // keep-alive reuses the same slot, so Content-Length/path metadata must be reset per request instead of inheriting the previous POST.
     hw.* = .{};
     slot.line1.oversized = false;
     return hw;
@@ -58,7 +58,7 @@ fn clearPendingHeaderCopy(allocator: std.mem.Allocator, slot: *StackSlot, hw: *H
 fn savePendingHeaderCopy(allocator: std.mem.Allocator, slot: *StackSlot, hw: *HttpWork, data: []const u8) !void {
     clearPendingHeaderCopy(allocator, slot, hw);
     const saved = try allocator.dupe(u8, data);
-    // 修改原因：多次 TCP 分片后的 header 不再完整存在于某一个 read buffer，必须保存累计副本。
+    // After multiple TCP fragments the header no longer lives in a single read buffer, so the accumulated copy must be saved.
     slot.line3.pending_buffer_ptr = @intFromPtr(saved.ptr);
     hw.pending_bid = NO_READ_BUFFER_BID;
     hw.pending_len = @intCast(saved.len);
@@ -67,7 +67,7 @@ fn savePendingHeaderCopy(allocator: std.mem.Allocator, slot: *StackSlot, hw: *Ht
 
 pub fn submitRead(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
     _ = conn_id;
-    // 修改原因：read_buf_recycled 针对单次 read CQE，重新提交 buffer-selection read 前必须重置。
+    // read_buf_recycled tracks a single read CQE, so it must be reset before re-submitting a buffer-selection read.
     prepareReadSubmission(conn);
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
     const fd = conn.ioFd();
@@ -135,8 +135,8 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
     if (!has_header_end) {
         const header_limit = reassembledHeaderLimit(self.cfg.max_header_buffer_size);
         if (headerBufferFullWithoutTerminator(effective_nread, header_limit)) {
-            // 修改原因：重组缓冲到达上限且仍无 header 结束符时，下一次读取已无法继续追加字节；
-            // 继续 submitRead 会让连接卡在 8192 字节重组循环里，应立即返回 431。
+            // The reassembly buffer hit its limit with no header terminator, so the next read can no longer append bytes;
+            // continuing to submitRead would leave the connection stuck in the 8192-byte reassembly loop, so return 431 immediately.
             self.buffer_pool.markReplenish(bid);
             conn.read_len = 0;
             conn.keep_alive = false;
@@ -184,7 +184,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
     conn.state = .processing;
 
     if (!parser.requestLineIsSupported(effective_buf)) {
-        // 修改原因：请求行必须包含 method、target 和 HTTP/1.x 版本；畸形请求不能继续进入业务 handler。
+        // The request line must contain method, target, and an HTTP/1.x version; a malformed request must not reach the business handler.
         self.buffer_pool.markReplenish(bid);
         conn.read_len = 0;
         conn.keep_alive = false;
@@ -193,7 +193,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
     }
 
     if (!parser.requestHeadersAreWellFormed(effective_buf)) {
-        // 修改原因：畸形 header 行不能被业务层忽略后继续处理，否则会放宽 HTTP 边界并影响后续头解析。
+        // Malformed header lines must not be ignored and passed to the business layer, or HTTP boundaries would be relaxed and later header parsing affected.
         self.buffer_pool.markReplenish(bid);
         conn.read_len = 0;
         conn.keep_alive = false;
@@ -202,7 +202,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
     }
 
     if (!parser.hostHeaderIsValidForRequest(effective_buf)) {
-        // 修改原因：HTTP/1.1 要求且只允许一个 Host；缺失或重复 Host 不能继续交给业务 handler。
+        // HTTP/1.1 requires exactly one Host header; a missing or duplicate Host must not be passed to the business handler.
         self.buffer_pool.markReplenish(bid);
         conn.read_len = 0;
         conn.keep_alive = false;
@@ -230,10 +230,10 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
                 const path_start = after_method;
                 if (std.mem.indexOfScalar(u8, effective_buf[path_start..effective_nread], ' ')) |sp2| {
                     const raw_target = effective_buf[path_start..][0..sp2];
-                    // 修改原因：路由匹配只使用 path，不能把 query string 一起写入 fast-path cache。
+                    // Routing matches on path only; the query string must not be written into the fast-path cache.
                     const q_pos = std.mem.indexOfScalar(u8, raw_target, '?') orelse raw_target.len;
                     if (q_pos == 0 or q_pos > path_limit) {
-                        // 修改原因：fast-path cache 之前没有执行 max_path_length，超长路径会绕过 helper 进入路由层。
+                        // max_path_length was not enforced before the fast-path cache, so an overlong path would bypass the helper and reach routing.
                         self.buffer_pool.markReplenish(bid);
                         conn.read_len = 0;
                         conn.keep_alive = false;
@@ -250,13 +250,13 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             }
         }
         if (std.mem.indexOf(u8, effective_buf, "\r\n\r\n")) |pos| {
-            // 修改原因：后续要计算 body 起点，CRLF 和 LF-only 分隔符长度不同。
+            // The body start is computed next; CRLF and LF-only separators have different lengths.
             hw.headers_end = @intCast(pos + 4);
         } else if (std.mem.indexOf(u8, effective_buf, "\n\n")) |pos| {
             hw.headers_end = @intCast(pos + 2);
         }
         if (helpers.extractHeader(effective_buf, "Transfer-Encoding")) |_| {
-            // 修改原因：当前请求体读取只支持 Content-Length，不支持 chunked；继续交给 handler 会把分块 body 留在连接里污染后续请求。
+            // Body reads currently support only Content-Length, not chunked; handing off would leave the chunked body in the connection and corrupt subsequent requests.
             self.buffer_pool.markReplenish(bid);
             conn.read_len = 0;
             conn.keep_alive = false;
@@ -264,7 +264,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             return;
         }
         const content_length_value = parser.extractSingleContentLength(effective_buf) catch {
-            // 修改原因：重复 Content-Length 会让请求体边界产生歧义，不能只取第一个值继续处理。
+            // Duplicate Content-Length makes the body boundary ambiguous, so the first value alone cannot be used.
             self.buffer_pool.markReplenish(bid);
             conn.read_len = 0;
             conn.keep_alive = false;
@@ -272,9 +272,9 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             return;
         };
         if (content_length_value) |val| {
-            // 修改原因：HTTP header 名大小写不敏感，lowercase content-length 也必须生效。
+            // HTTP header names are case-insensitive, so a lowercase content-length must also take effect.
             hw.content_length = parser.parseContentLength(val) catch {
-                // 修改原因：非法 Content-Length 不能按无 body 继续处理，否则坏请求会进入 handler 并污染 keep-alive 连接。
+                // An invalid Content-Length must not be treated as no body, or the bad request would reach the handler and corrupt the keep-alive connection.
                 self.buffer_pool.markReplenish(bid);
                 conn.read_len = 0;
                 conn.keep_alive = false;
@@ -295,7 +295,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         if (completeRequestEnd(effective_nread, hw_req.headers_end, hw_req.content_length)) |request_end| {
             request_buf = effective_buf[0..request_end];
             if (request_end < effective_nread) {
-                // 修改原因：当前事件循环一次只调度一个 HTTP 请求；同一 read buffer 中的尾随请求若继续 keep-alive 会被静默丢弃并让客户端超时。
+                // The event loop currently schedules only one HTTP request at a time; a trailing request in the same read buffer would be silently dropped and time out the client if keep-alive continued.
                 conn.keep_alive = false;
             }
         }
@@ -388,7 +388,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
             }
         }
 
-        // 修改原因：未匹配当前 path 的快速中间件不能直接返回空 200，否则会绕过正常 handler。
+        // Fast middleware that did not match the current path must not return an empty 200, or it would bypass the normal handler.
         if (matched_respond_middleware) {
             self.buffer_pool.markReplenish(bid);
             conn.read_len = 0;
@@ -469,7 +469,7 @@ fn dispatchToHandler(self: *AsyncServer, conn_id: u64, conn: *Connection, path: 
             self.respond(conn, 500, "Internal Server Error");
             return;
         };
-        // 修改原因：跨 TCP 分片时 effective_buf 指向栈上 combo，fiber/队列不能持有栈指针。
+        // Across TCP fragments effective_buf points at the stack combo buffer, so fibers/queues must not hold a stack pointer.
         request_data_owned = true;
     }
     const method_str = getMethodFromRequest(selected_buf) orelse "GET";
@@ -536,8 +536,8 @@ fn startBodyRead(self: *AsyncServer, conn_id: u64, conn: *Connection, bid: u16, 
     const hw4 = sticker.httpWork(slot);
     const headers_end = if (hw4.headers_end > 0) hw4.headers_end else effective_nread;
     if (!fitsLargeBodyBuffer(hw4.content_length)) {
-        // 修改原因：LargeBufferPool 每块只有 1MB；继续用 min(content_length, large_buf.len)
-        // 会把超大请求体截断后交给业务层，并把剩余字节留在连接里污染后续请求。
+        // LargeBufferPool blocks are only 1MB each; using min(content_length, large_buf.len)
+        // would truncate an oversized body before the business layer sees it and leave the remaining bytes to corrupt subsequent requests.
         self.buffer_pool.markReplenish(bid);
         conn.read_len = 0;
         conn.keep_alive = false;
@@ -545,8 +545,8 @@ fn startBodyRead(self: *AsyncServer, conn_id: u64, conn: *Connection, bid: u16, 
         return true;
     }
     if (reassembled_header or (build_options.tls_enabled and tls_decrypted)) {
-        // 修改原因：reassembled_header 时 effective_buf 指向 combo 栈上副本；TLS 解密时 effective_buf 指向 plaintext_buf 栈上副本。
-        // 进入异步 body 读取后栈已展开，必须把 header 保存到 heap，否则 processBodyRequest 会读到脏数据。
+        // With reassembled_header, effective_buf points at the stack combo copy; with TLS decryption it points at the stack plaintext_buf copy.
+        // Once async body reading begins the stack is unwound, so the header must be saved to the heap or processBodyRequest will read garbage.
         const header_copy = self.allocator.dupe(u8, effective_buf[0..headers_end]) catch {
             self.buffer_pool.markReplenish(bid);
             conn.read_len = 0;
@@ -572,7 +572,7 @@ fn startBodyRead(self: *AsyncServer, conn_id: u64, conn: *Connection, bid: u16, 
         conn.read_len = 0;
         conn.state = .receiving_body;
         self.submitBodyRead(conn, large_buf, slot) catch {
-            // 修改原因：body read SQE 提交失败后不会再进入 processBodyRequest，必须归还之前保留的 header read buffer。
+            // A failed body-read SQE submission never reaches processBodyRequest, so the retained header read buffer must be returned.
             self.buffer_pool.markReplenish(bid);
             conn.read_bid = NO_READ_BUFFER_BID;
             conn.read_len = 0;
@@ -601,7 +601,7 @@ fn startBodyRead(self: *AsyncServer, conn_id: u64, conn: *Connection, bid: u16, 
     conn.read_len = 0;
     conn.state = .receiving_body;
     self.submitBodyRead(conn, large_buf, slot) catch {
-        // 修改原因：body read SQE 提交失败后不会再进入 processBodyRequest，必须归还之前保留的 header read buffer。
+        // A failed body-read SQE submission never reaches processBodyRequest, so the retained header read buffer must be returned.
         self.buffer_pool.markReplenish(bid);
         conn.read_bid = NO_READ_BUFFER_BID;
         conn.read_len = 0;
@@ -679,7 +679,7 @@ fn reassembleHeader(self: *AsyncServer, conn: *Connection, effective_buf: []cons
             var saved_heap: ?[]u8 = null;
             const prev_buf: []const u8 = if (slot.line3.pending_buffer_ptr != 0) blk: {
                 const saved: []u8 = @as([*]u8, @ptrFromInt(slot.line3.pending_buffer_ptr))[0..prev_len];
-                // 修改原因：超过两段的 header 重组不能只依赖上一个 buffer id，累计片段必须从堆副本恢复。
+                // Reassembling a header split across more than two reads cannot rely on the previous buffer id alone; accumulated fragments must be restored from the heap copy.
                 saved_heap = saved;
                 slot.line3.pending_buffer_ptr = 0;
                 hw.header_len = 0;

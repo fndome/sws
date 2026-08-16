@@ -1,12 +1,12 @@
-/// ── Next.submit 切线程做 CPU 重活（如 LLM 推理）──
+/// ── Next.submit switches threads for CPU-heavy work (e.g. LLM inference) ──
 ///
-/// Next.submit: 线程池执行，切线程。main 里需要:
+/// Next.submit: runs on the thread pool, switching threads. In main you need:
 ///   try server.initPool4NextSubmit(2);
 ///
-/// ⚠️ 只有 CPU 密集 / 阻塞 I/O 才用 submit。
-///    io_uring 场景用 Next.go，不要切线程。
+/// ⚠️ Use submit only for CPU-bound / blocking I/O.
+///    For io_uring scenarios use Next.go, don't switch threads.
 ///
-/// 用法：server.POST("/infer", inferHandler)
+/// Usage: server.POST("/infer", inferHandler)
 
 const std = @import("std");
 
@@ -22,13 +22,13 @@ const InferCtx = struct {
     prompt: []const u8,
 };
 
-/// execFn 在线程池线程上执行（不在 IO 线程）
+/// execFn runs on a thread pool thread (not the IO thread)
 fn inferExec(c: *InferCtx, complete: *const fn (?*anyopaque, []const u8) void) void {
     defer c.allocator.destroy(c);
     defer c.allocator.destroy(c.resp);
 
-    // ── CPU 重活：模型推理 ──
-    // const output = llm.generate(c.prompt);   // 阻塞几十秒
+    // ── CPU-heavy work: model inference ──
+    // const output = llm.generate(c.prompt);   // blocks for tens of seconds
 
     const output = std.fmt.allocPrint(c.allocator,
         "{{\"reply\":\"Hello, you said: {s}\"}}", .{c.prompt}

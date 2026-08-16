@@ -55,7 +55,7 @@ fn storeIncompleteWsFrame(allocator: Allocator, conn: *Connection, data: []u8, o
 }
 
 fn finishSynchronousWsHandler(self: *AsyncServer, conn_id: u64, conn: *Connection, bid: u16) void {
-    // 修改原因：同步兜底 handler 使用的 payload 可能还指向 read buffer，必须等 handler 返回后再归还 bid。
+    // The synchronous fallback handler's payload may still point into the read buffer, so the bid must be returned only after the handler returns.
     if (bid != NO_READ_BUFFER_BID) self.buffer_pool.markReplenish(bid);
     conn.read_buf_recycled = true;
     conn.read_len = 0;
@@ -92,8 +92,8 @@ pub fn tryWsUpgrade(self: *AsyncServer, conn_id: u64, conn: *Connection, path: [
         return;
     };
 
-    // 修改原因：computeAcceptKey max_key_len = 128 - 36 = 92；这里用 96 的不一致会导致
-    // 93-96 字节 key 通过前置检查后被 computeAcceptKey 拒绝，浪费 buffer 操作。
+    // computeAcceptKey's max key length is 128 - 36 = 92; using 96 here would let a
+    // 93-96 byte key pass this pre-check and then be rejected by computeAcceptKey, wasting buffer work.
     if (ws_key.len > 92) {
         self.buffer_pool.markReplenish(bid);
         conn.read_len = 0;
@@ -131,7 +131,7 @@ pub fn tryWsUpgrade(self: *AsyncServer, conn_id: u64, conn: *Connection, path: [
 
     self.buffer_pool.markReplenish(bid);
     conn.read_len = 0;
-    // 修改原因：只有握手成功后才能把 token 挂到连接上，避免失败升级路径泄漏或污染 HTTP 连接状态。
+    // Attach the token to the connection only after the handshake succeeds, avoiding leaks or state corruption on failed upgrade paths.
     conn.ws_token = pending_token;
     pending_token = null;
     conn.keep_alive = false;
@@ -222,8 +222,8 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
     const frame = ws_frame.parseFrame(frame_input) catch |err| {
         switch (err) {
             error.IncompleteFrame => {
-                // 修改原因：TCP 可以把一个 WebSocket frame 拆成多次 read；半帧应累计等待下一段，
-                // 不能当协议错误直接断开连接。
+                // TCP may split one WebSocket frame across multiple reads; accumulate the partial frame
+                // and wait for the next segment instead of treating it as a protocol error and disconnecting.
                 storeIncompleteWsFrame(self.allocator, conn, frame_input, &owned_frame_input) catch {
                     self.buffer_pool.markReplenish(bid);
                     conn.read_len = 0;
@@ -375,7 +375,7 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
                     if (n.push(fiber_task.WsTaskCtx, t.*, fiber_task.wsTaskExecWrapperWithOwnership, self.cfg.fiber_stack_size_kb * 1024)) {
                         self.ws_ctx_pool.destroy(t);
                     } else {
-                        // 修改原因：WS 任务入队失败时必须释放复制前持有的 payload，避免池泄漏。
+                        // On WS task enqueue failure the payload captured before the copy must be freed to avoid a pool leak.
                         fiber_task.wsTaskCleanup(t);
                         self.closeConn(conn_id, conn.fd);
                         return;
@@ -458,7 +458,7 @@ fn shouldQueueWsSend(conn: *const Connection) bool {
 pub fn sendWsFrame(self: *AsyncServer, conn_id: u64, opcode: Opcode, payload: []const u8) !void {
     const conn = self.getConn(conn_id) orelse return;
 
-    // 修改原因：协议层 ping/close 响应会进入 ws_writing 但不设置 is_writing，应用发送必须排队避免覆盖 response_buf。
+    // Protocol-level ping/close responses enter ws_writing without setting is_writing, so application sends must queue to avoid clobbering response_buf.
     if (shouldQueueWsSend(conn)) {
         const dup = self.allocator.dupe(u8, payload) catch {
             return error.OutOfMemory;

@@ -4,7 +4,7 @@ const websocket_magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub fn isUpgradeRequest(data: []const u8) bool {
     if (std.mem.indexOf(u8, data, "\r\n\r\n") == null) return false;
-    // 修改原因：WebSocket 握手只能使用 HTTP/1.1 GET；只看 Upgrade 头会把 POST/HTTP1.0 请求误升级。
+    // A WebSocket handshake must be an HTTP/1.1 GET; only checking the Upgrade header would wrongly upgrade POST/HTTP/1.0 requests.
     if (!requestLineIsWebSocketGet(data)) return false;
 
     var has_upgrade = false;
@@ -14,7 +14,7 @@ pub fn isUpgradeRequest(data: []const u8) bool {
     var has_ws_version = false;
     var lines = std.mem.splitSequence(u8, data, "\r\n");
     while (lines.next()) |line| {
-        // 修改原因：HTTP 头部到空行就结束，不能继续把 body 中伪造的 Sec-WebSocket-* 行当成握手头。
+        // HTTP headers end at the blank line, so forged Sec-WebSocket-* lines in the body must not be treated as handshake headers.
         if (line.len == 0) break;
         if (std.ascii.startsWithIgnoreCase(line, "Upgrade:")) {
             const value = std.mem.trim(u8, line["Upgrade:".len..], " \t");
@@ -24,17 +24,17 @@ pub fn isUpgradeRequest(data: []const u8) bool {
         }
         if (std.ascii.startsWithIgnoreCase(line, "Connection:")) {
             const value = std.mem.trim(u8, line["Connection:".len..], " \t\r\n");
-            // 修改原因：RFC 6455 握手必须带 Connection: Upgrade；只看 Upgrade 头会把普通请求误升级。
+            // An RFC 6455 handshake requires Connection: Upgrade; only checking the Upgrade header would wrongly upgrade ordinary requests.
             if (headerValueHasToken(value, "upgrade")) {
                 has_connection_upgrade = true;
             }
         }
         if (std.ascii.startsWithIgnoreCase(line, "Sec-WebSocket-Key:")) {
-            // 修改原因：后续 extractWsKey 只取第一个 key；重复 key 会让校验值和实际握手值不一致，必须拒绝。
+            // extractWsKey only takes the first key later; a duplicate key would make the validated value differ from the actual handshake value and must be rejected.
             ws_key_count += 1;
             if (ws_key_count > 1) return false;
             const value = std.mem.trim(u8, line["Sec-WebSocket-Key:".len..], " \t\r\n");
-            // 修改原因：Sec-WebSocket-Key 必须是 base64 后的 16 字节 nonce；只检查存在会接受非法握手。
+            // Sec-WebSocket-Key must be the base64 of a 16-byte nonce; only checking presence would accept an illegal handshake.
             has_ws_key = isValidWsKey(value);
         }
         if (std.ascii.startsWithIgnoreCase(line, "Sec-WebSocket-Version:")) {
@@ -77,7 +77,7 @@ fn isValidWsKey(key: []const u8) bool {
 pub fn extractWsKey(data: []const u8) ?[]const u8 {
     var lines = std.mem.splitSequence(u8, data, "\r\n");
     while (lines.next()) |line| {
-        // 修改原因：Sec-WebSocket-Key 必须来自 HTTP header，不能从 header 结束后的 body 提取。
+        // Sec-WebSocket-Key must come from the HTTP headers, not from the body after the header terminator.
         if (line.len == 0) break;
         if (std.ascii.startsWithIgnoreCase(line, "Sec-WebSocket-Key:")) {
             const key_start = line[18..];
@@ -92,7 +92,7 @@ pub fn computeAcceptKey(key: []const u8, buf: *[29]u8) !void {
     const Sha1 = std.crypto.hash.Sha1;
     const max_key_len: usize = 128 - websocket_magic.len;
     if (key.len > max_key_len) return error.KeyTooLong;
-    // 修改原因：computeAcceptKey 是 public API，不能只依赖调用方先跑 isUpgradeRequest；非法 nonce 不应生成 101 Accept。
+    // computeAcceptKey is a public API and cannot rely on the caller having run isUpgradeRequest first; an illegal nonce must not produce a 101 Accept.
     if (!isValidWsKey(key)) return error.InvalidKey;
 
     var concat: [128]u8 = undefined;

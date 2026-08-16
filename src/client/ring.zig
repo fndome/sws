@@ -14,15 +14,15 @@ const MAX_CQES_TICK = 64;
 
 /// ── Ring B ────────────────────────────────────────────────
 ///
-/// 出站 HTTP 客户端 IO 归口。
-/// 持有 ring + RingShared + IORegistry + DnsResolver + InvokeQueue + TinyCache。
+/// Central IO entry point for the outbound HTTP client.
+/// Owns ring + RingShared + IORegistry + DnsResolver + InvokeQueue + TinyCache.
 ///
-/// 调用方应自行驱动 RingB.tick()（可在独立线程中轮询）。
+/// The caller should drive RingB.tick() itself (it may be polled on a separate thread).
 ///
-/// TinyCache 内建在 RingB 中，由 RingB.tick() 每轮自动淘汰过期连接，
-/// 用户无需手动管理缓存生命周期。
+/// TinyCache is built into RingB and its expired connections are evicted automatically by RingB.tick() each round,
+/// so the user never needs to manage the cache lifetime manually.
 ///
-/// 用法：
+/// Usage:
 ///   const ring_b = try RingB.init(alloc, io, server.ring.fd, 1000);
 ///   defer ring_b.deinit();
 ///   try ring_b.registerWith(&fiber_shared);
@@ -34,13 +34,13 @@ pub const RingB = struct {
     rs: RingShared,
     dns: *DnsResolver,
     invoke: InvokeQueue,
-    /// 内建出站连接缓存：同 host:port 在 TTL 内复用 TCP 连接。
-    /// RingB.tick() 自动淘汰过期条目，用户无需干预。
+    /// Built-in outbound connection cache: reuses TCP connections for the same host:port within the TTL.
+    /// RingB.tick() evicts expired entries automatically; the user needs no intervention.
     http_cache: TinyCache,
-    /// 同 (host, port) 并发建连计数，防止死目标扇出耗尽 SQE ring。
-    /// 键格式: "host:port"，值为当前正在建连的 fiber 数量。
+    /// Concurrent connect count per (host, port), to prevent dead-target fan-out from exhausting the SQE ring.
+    /// Key format: "host:port", value is the number of fibers currently connecting.
     connecting: std.StringHashMap(u32),
-    /// 单目标最大并发建连数
+    /// Maximum concurrent connects per target
     pub const MAX_CONCURRENT_CONNECTS: u32 = 4;
 
     pub fn init(allocator: Allocator, io: std.Io, attach_ring_fd: i32, cache_ttl_ms: i64) !RingB {
@@ -48,7 +48,7 @@ pub const RingB = struct {
 
         var ring = brk: {
             var params = std.mem.zeroes(linux.io_uring_params);
-            // 修改原因：RingB 可能由主流程创建后交给 IO tick 驱动，SINGLE_ISSUER 会要求创建/提交同线程。
+            // RingB may be created by the main flow and then driven by the IO tick, but SINGLE_ISSUER requires create/submit on the same thread.
             params.flags = linux.IORING_SETUP_DEFER_TASKRUN |
                 linux.IORING_SETUP_ATTACH_WQ;
             params.wq_fd = @intCast(attach_ring_fd);
@@ -99,7 +99,7 @@ pub const RingB = struct {
         self.ring.deinit();
     }
 
-    /// 非阻塞收割 Ring B 的 CQE + 淘汰过期缓存连接。
+    /// Non-blockingly harvests Ring B CQEs and evicts expired cache connections.
     pub fn tick(self: *RingB) void {
         if (self.http_cache.enabled()) {
             self.http_cache.tick(nowMs());
@@ -110,7 +110,7 @@ pub const RingB = struct {
 
         var cqes: [MAX_CQES_TICK]linux.io_uring_cqe = undefined;
         const n = self.ring.copy_cqes(&cqes, 0) catch return;
-        // 修改原因：copy_cqes 会自动推进 CQ head，不能再对复制出来的 CQE 调 cqe_seen。
+        // copy_cqes advances the CQ head automatically, so the copied CQEs must not be passed to cqe_seen.
         for (cqes[0..n]) |*cqe| {
             const ud = cqe.user_data;
             if ((ud & CLIENT_USER_DATA_FLAG) != 0) {
@@ -151,7 +151,7 @@ pub const RingB = struct {
     }
 };
 
-/// 保留向下兼容别名
+/// Kept as a backward-compatible alias
 pub const HttpRing = RingB;
 
 fn nowMs() i64 {

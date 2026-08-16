@@ -3,13 +3,13 @@ const Allocator = std.mem.Allocator;
 const Frame = @import("types.zig").Frame;
 const Opcode = @import("types.zig").Opcode;
 
-/// WebSocket 消息处理函数，在 I/O 线程中被调用，必须非阻塞且快速返回。
-/// conn_id: 连接唯一标识
-/// frame:   收到的帧（由调用方管理生命周期，handler 内不应保存引用）
-/// ctx:     用户上下文（由 WsServer 的 ctx 字段传入）
+/// WebSocket message handler, invoked on the I/O thread; must be non-blocking and return quickly.
+/// conn_id: unique connection identifier
+/// frame:   the received frame (lifetime managed by the caller; the handler should not keep a reference)
+/// ctx:     user context (passed in via the WsServer ctx field)
 pub const WsHandler = *const fn (conn_id: u64, frame: *const Frame, ctx: *anyopaque) void;
 
-/// 发送 WebSocket 帧的函数类型，由父服务器提供。
+/// Function type for sending a WebSocket frame, provided by the parent server.
 pub const SendFn = *const fn (ctx: *anyopaque, conn_id: u64, opcode: Opcode, payload: []const u8) anyerror!void;
 
 pub const WsServer = struct {
@@ -38,8 +38,8 @@ pub const WsServer = struct {
         self.handlers.deinit();
     }
 
-    /// 关闭所有活跃连接（发送 Close 帧）。
-    /// 调用者应在销毁 WsServer 前调用，并随后关闭底层 TCP 连接。
+    /// Close all active connections (by sending a Close frame).
+    /// The caller should invoke this before destroying WsServer, then close the underlying TCP connections.
     pub fn closeAllActive(self: *WsServer) void {
         var it = self.active.iterator();
         while (it.next()) |entry| {
@@ -52,7 +52,7 @@ pub const WsServer = struct {
 
     pub fn register(self: *WsServer, path: []const u8, handler: WsHandler) !void {
         const key = try self.allocator.dupe(u8, path);
-        // 修改原因：WebSocket 路由表必须拥有 path key；否则调用方传入临时 buffer 后会留下悬空 key。
+        // The WebSocket route table must own the path key; otherwise a caller-passed temporary buffer would leave a dangling key.
         errdefer self.allocator.free(key);
         const gop = try self.handlers.getOrPut(key);
         if (gop.found_existing) {
@@ -86,8 +86,8 @@ pub const WsServer = struct {
     }
 };
 
-/// 自动响应 WebSocket 控制帧。
-/// 返回 true 表示应关闭连接（收到 Close 帧）。
+/// Automatically respond to WebSocket control frames.
+/// Returns true when the connection should be closed (a Close frame was received).
 pub fn handleControlFrame(server: *WsServer, conn_id: u64, opcode: Opcode, payload: []const u8) !bool {
     switch (opcode) {
         .ping => {

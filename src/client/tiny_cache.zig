@@ -4,13 +4,13 @@ const Allocator = std.mem.Allocator;
 const RingSharedClient = @import("../shared/tcp_stream.zig").RingSharedClient;
 const Pipe = @import("../next/pipe.zig").Pipe;
 
-/// ── 出站连接池 ──────────────────────────────────────────
+/// ── Outbound connection pool ──────────────────────────────────────────
 ///
-/// 同 host:port 允许多条并发连接 (K8s pod 间通信需要)。
-/// getPipe() 优先借出空闲连接，全部借出时返回 null 让调用方新建。
-/// releasePipe() 归还到池。TTL 过期自动淘汰空闲连接。
+/// Multiple concurrent connections per host:port are allowed (needed for K8s pod-to-pod communication).
+/// getPipe() prefers lending an idle connection; when all are lent out it returns null so the caller opens a new one.
+/// releasePipe() returns a connection to the pool. Idle connections are evicted automatically when their TTL expires.
 ///
-/// 上限: MAX_CONNS_PER_HOST = 8
+/// Limit: MAX_CONNS_PER_HOST = 8
 const MAX_CONNS_PER_HOST: usize = 12;
 
 const PoolEntry = struct {
@@ -49,14 +49,14 @@ pub const TinyCache = struct {
         self.entries.deinit(self.allocator);
     }
 
-    /// 借出一条空闲连接到 host:port。返回 (stream, pipe) 或 null。
+    /// Lend an idle connection to host:port. Returns (stream, pipe) or null.
     pub fn acquire(self: *TinyCache, host: []const u8, port: u16, tls: bool, now_ms: i64) ?struct { stream: *RingSharedClient, pipe: *Pipe } {
         if (!self.enabled()) return null;
         for (self.entries.items) |*e| {
             if (e.borrowed) continue;
             if (e.port != port) continue;
             if (e.tls != tls) continue;
-            // 修改原因：HTTP/DNS 主机名大小写不敏感，连接池复用也必须折叠大小写，避免同一上游重复建连。
+            // HTTP/DNS hostnames are case-insensitive, so pool reuse must also fold case to avoid reconnecting to the same upstream.
             if (!sameHost(e.host, host)) continue;
             if (now_ms - e.last_used_ms >= self.ttl_ms) continue;
             e.pipe.reset();
@@ -67,7 +67,7 @@ pub const TinyCache = struct {
         return null;
     }
 
-    /// 归还借出的连接。
+    /// Return a lent-out connection.
     pub fn release(self: *TinyCache, p: *const Pipe, now_ms: i64) void {
         for (self.entries.items) |*e| {
             if (&e.pipe == p) {
@@ -78,15 +78,15 @@ pub const TinyCache = struct {
         }
     }
 
-    /// 存入新连接到池。池满时返回 error.PoolFull。
+    /// Store a new connection into the pool. Returns error.PoolFull when the pool is full.
     pub fn store(self: *TinyCache, stream: *RingSharedClient, p: Pipe, host: []const u8, port: u16, tls: bool, now_ms: i64) !void {
         if (!self.enabled()) {
-            // 修改原因：store 失败时调用方仍负责释放 stream/pipe；这里提前 deinit 会和调用方 catch 路径 double-free。
+            // On store failure the caller still owns stream/pipe; deinit'ing here would double-free with the caller's catch path.
             return error.CacheDisabled;
         }
         self.evictExpired(now_ms);
         if (self.countForHostPort(host, port, tls) >= MAX_CONNS_PER_HOST) {
-            // 修改原因：上限语义是同一 host:port 的并发连接数，不能让其他上游占满全局池导致误报 PoolFull。
+            // The limit applies to the number of concurrent connections for the same host:port; other upstreams must not fill the global pool and cause a false PoolFull.
             return error.PoolFull;
         }
         const host_dup = self.allocator.dupe(u8, host) catch {
@@ -104,7 +104,7 @@ pub const TinyCache = struct {
         });
     }
 
-    /// 淘汰单条连接 (write/read 失败时用)
+    /// Evict a single connection (used on write/read failure)
     pub fn evictPipe(self: *TinyCache, p: *const Pipe) void {
         for (self.entries.items, 0..) |*e, i| {
             if (&e.pipe == p) {
@@ -118,7 +118,7 @@ pub const TinyCache = struct {
     }
 
     pub fn pipeForStream(self: *TinyCache, stream: *RingSharedClient) ?*Pipe {
-        // 修改原因：HTTP client 的回包必须按连接查找 Pipe，不能依赖 threadlocal active_pipe。
+        // HTTP client replies must be looked up by connection, not via a threadlocal active_pipe.
         for (self.entries.items) |*e| {
             if (e.stream == stream) return &e.pipe;
         }
@@ -126,7 +126,7 @@ pub const TinyCache = struct {
     }
 
     pub fn evictStream(self: *TinyCache, stream: *RingSharedClient) void {
-        // 修改原因：连接关闭回调只知道 stream，需能稳定淘汰对应缓存项并释放 Pipe。
+        // The connection-close callback only knows the stream, so it must reliably evict the matching cache entry and free the Pipe.
         for (self.entries.items, 0..) |*e, i| {
             if (e.stream == stream) {
                 self.allocator.free(e.host);
@@ -138,7 +138,7 @@ pub const TinyCache = struct {
         }
     }
 
-    /// tick() 周期调用：淘汰过期且未借出的连接
+    /// Called periodically by tick(): evicts expired connections that are not lent out
     pub fn tick(self: *TinyCache, now_ms: i64) void {
         if (!self.enabled()) return;
         self.evictExpired(now_ms);

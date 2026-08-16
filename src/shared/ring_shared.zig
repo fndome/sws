@@ -4,7 +4,7 @@ const IORegistry = @import("io_registry.zig").IORegistry;
 const CqeDispatchFn = @import("io_registry.zig").CqeDispatchFn;
 const InvokeQueue = @import("io_invoke.zig").InvokeQueue;
 
-/// 单 ring 共享资源。注入到 server 和各 client，一切平等。
+/// Shared resources for a single ring. Injected into the server and every client alike.
 pub const RingShared = struct {
     ring: *linux.IoUring,
     registry: *IORegistry,
@@ -27,15 +27,15 @@ pub const RingShared = struct {
         self.registry = registry;
     }
 
-    /// 获取 ring。ring 未开启 SINGLE_ISSUER，可跨线程 submit（server 的
-    /// connect 在 main、run 在 IO 线程；RingB 的 init 在 setup、驱动在 client
-    /// 线程），因此这里不做单线程断言。
+    /// Get the ring. The ring does not enable SINGLE_ISSUER, so it can submit across threads (the server's
+    /// connect runs on main while run runs on the IO thread; RingB's init is in setup and its driver on the client
+    /// thread), so no single-thread assertion is made here.
     pub fn ringPtr(self: *const RingShared) *linux.IoUring {
         return self.ring;
     }
 
-    /// 获取 registry。register/remove 合法地在 init/deinit（setup）线程与
-    /// IO 线程之间先后发生（init 在 start 前、deinit 在 join 后），并非并发。
+    /// Get the registry. register/remove legitimately happen between the init/deinit (setup) thread and
+    /// the IO thread in sequence (init before start, deinit after join), not concurrently.
     pub fn registryPtr(self: *const RingShared) *IORegistry {
         return self.registry;
     }

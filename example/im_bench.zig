@@ -77,13 +77,13 @@ fn countResponses(data: []const u8) usize {
 
 fn readPortEnv(default_port: u16) u16 {
     const raw = std.c.getenv("SWS_BENCH_PORT") orelse return default_port;
-    // 修改原因：benchmark 跟随自测脚本端口配置，避免旧进程占用固定 19090 阻塞验证。
+    // Benchmark follows the self-test script's port config to avoid a stale process holding the fixed 19090 and blocking verification.
     return std.fmt.parseInt(u16, std.mem.span(raw), 10) catch default_port;
 }
 
 fn readUsizeEnv(comptime name: [:0]const u8, default_value: usize) usize {
     const raw = std.c.getenv(name) orelse return default_value;
-    // 修改原因：benchmark 需要区分小烟测和放大压测，连接数/请求数不能硬编码在源码里。
+    // Benchmark needs to distinguish a small smoke test from a scale test; connection/request counts must not be hardcoded in the source.
     const parsed = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch return default_value;
     return if (parsed == 0) default_value else parsed;
 }
@@ -100,7 +100,7 @@ fn drainAvailable(fd: i32, buf: []u8) usize {
 }
 
 fn writeAllRequest(fd: i32, req: []const u8) bool {
-    // 修改原因：高连接数压测时 write 可能短写；半个 HTTP 请求进入连接会污染后续请求，benchmark 必须只统计完整写入。
+    // Under high connection counts write may short-write; a partial HTTP request entering the connection corrupts subsequent requests, so the benchmark must only count fully written requests.
     var written_total: usize = 0;
     while (written_total < req.len) {
         const raw_written = linux.write(fd, req.ptr + written_total, req.len - written_total);
@@ -139,7 +139,7 @@ fn drainUntil(fds: []const i32, poll_fds: []std.posix.pollfd, buf: []u8, recv: *
         if (progressed) {
             idle_rounds = 0;
         } else {
-            // 修改原因：固定 sleep 10ms 会把 100 轮 smoke benchmark 人为限制在约 5k req/s；poll 可在响应到达时立即继续。
+            // A fixed 10ms sleep would artificially cap the 100-round smoke benchmark at ~5k req/s; poll lets it continue as soon as a response arrives.
             if (waitReadable(fds, poll_fds)) {
                 idle_rounds = 0;
             } else {
@@ -150,7 +150,7 @@ fn drainUntil(fds: []const i32, poll_fds: []std.posix.pollfd, buf: []u8, recv: *
 }
 
 pub fn main() !void {
-    // 修改原因：benchmark 目标是测 HTTP/io_uring 路径，不应把 DebugAllocator 的检查开销计入 QPS。
+    // The benchmark targets the HTTP/io_uring path, so DebugAllocator's checking overhead must not count toward QPS.
     const alloc = std.heap.c_allocator;
 
     const port = readPortEnv(DEFAULT_PORT);
@@ -219,11 +219,11 @@ pub fn main() !void {
             if (fd == 0) continue;
             if (writeAllRequest(fd, req)) sent += 1;
         }
-        // 修改原因：当前 server 不支持在同一连接中无限 HTTP pipelining，需收齐本轮响应后再发下一轮。
+        // The server does not support unbounded HTTP pipelining on a single connection, so all responses for this round must be drained before sending the next round.
         drainUntil(fds, poll_fds, buf[0..], &recv, sent, DRAIN_IDLE_ROUNDS);
     }
     // final drain
-    // 修改原因：keep-alive 连接不会主动 EOF，阻塞 read 会让 benchmark 在收尾阶段卡住。
+    // keep-alive connections never EOF on their own, so a blocking read would stall the benchmark during teardown.
     drainUntil(fds, poll_fds, buf[0..], &recv, sent, DRAIN_IDLE_ROUNDS);
     for (fds) |dfd| {
         if (dfd == 0) continue;

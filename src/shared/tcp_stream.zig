@@ -26,7 +26,7 @@ fn clientDispatch(ptr: *anyopaque, user_data: u64, res: i32) void {
 }
 
 fn streamSocketFd(raw_fd: usize) !i32 {
-    // 修改原因：linux.socket 失败时返回 errno 编码的 usize，先 @intCast 会在安全构建下触发整数转换失败。
+    // linux.socket returns an errno-encoded usize on failure; casting to i32 first would trigger an integer conversion failure in safe builds.
     if (linux.errno(raw_fd) != .SUCCESS) return error.SocketFailed;
     return @intCast(raw_fd);
 }
@@ -43,7 +43,7 @@ pub const RingSharedClient = struct {
     callback_ctx: ?*anyopaque,
 
     read_buf: []u8,
-    conn_errno: i32 = 0, // connect CQE 错误码 (0=成功, -ETIMEDOUT=超时)
+    conn_errno: i32 = 0, // connect CQE errno (0 = success, -ETIMEDOUT = timeout)
     connect_addr: linux.sockaddr = undefined,
     connect_timeout_ts: linux.timespec = .{ .sec = 0, .nsec = 0 },
     _connect_addrlen: u32 = 0,
@@ -153,7 +153,7 @@ pub const RingSharedClient = struct {
         const raw_fd = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, 0);
         const fd = try streamSocketFd(raw_fd);
         errdefer {
-            // 修改原因：connect 提交失败时 self.fd/self.id 已经写入，必须同步清理，避免调用方 deinit 时重复关闭 fd 或留下 registry 项。
+            // On connect submission failure self.fd/self.id are already written, so they must be cleaned up synchronously to avoid the caller's deinit double-closing the fd or leaving a registry entry.
             if (self.id != 0) {
                 self.rs.remove(self.id);
                 self.id = 0;
@@ -179,9 +179,9 @@ pub const RingSharedClient = struct {
         self._connect_addrlen = @sizeOf(linux.sockaddr.in);
         var registered = false;
         errdefer {
-            // 修改原因：connect SQE 入队或 submit 失败时，fd/id 仍挂在 client 上会导致后续重复 close 或注册表残留。
+            // When the connect SQE enqueue or submit fails, fd/id still attached to the client would cause a later double close or registry residue.
             if (registered) self.rs.remove(self.id);
-            // 修改原因：内层 errdefer 会先把 self.fd 复位，必须在复位前关闭本次创建的 socket，避免外层守卫看不到 fd。
+            // The inner errdefer resets self.fd first, so this socket must be closed before the reset or the outer guard cannot see the fd.
             if (self.fd == fd) _ = linux.close(fd);
             self.id = 0;
             self.fd = -1;
@@ -198,9 +198,9 @@ pub const RingSharedClient = struct {
 
     fn submitPollOut(self: *RingSharedClient, timeout_ms: u32) !void {
         const ring = self.rs.ringPtr();
-        // 修改原因：带超时的 connect 必须同时拿到 CONNECT 和 LINK_TIMEOUT 两个 SQE；否则会提交一个没有超时保护的连接。
+        // A connect with a timeout must obtain both the CONNECT and LINK_TIMEOUT SQEs; otherwise a connection with no timeout protection would be submitted.
         if (!hasConnectSqeCapacity(@intCast(ring.sq_ready()), ring.sq.sqes.len, timeout_ms)) return error.ConnectSubmitQueueFull;
-        // 修改原因：CONNECT SQE 都拿不到时不能静默成功，否则连接会永久停在 connecting 且 fd/registry 无法回收。
+        // Failing to obtain the CONNECT SQE must not succeed silently, or the connection would stay in connecting forever with no way to reclaim fd/registry.
         const sqe = ring.nop(self.id) catch return error.ConnectSubmitQueueFull;
         sqe.opcode = .CONNECT;
         sqe.fd = self.fd;
@@ -213,7 +213,7 @@ pub const RingSharedClient = struct {
             };
             sqe.flags |= linux.IOSQE_IO_LINK; // link LINK_TIMEOUT next
             tsqe.opcode = .LINK_TIMEOUT;
-            // 修改原因：LINK_TIMEOUT 的 timespec 会被内核异步读取，不能指向本函数的栈变量。
+            // The LINK_TIMEOUT timespec is read asynchronously by the kernel, so it must not point at a stack variable of this function.
             self.connect_timeout_ts = .{
                 .sec = @intCast(timeout_ms / 1000),
                 .nsec = @intCast((timeout_ms % 1000) * 1_000_000),
@@ -310,8 +310,8 @@ pub const RingSharedClient = struct {
         const to_send = self.write_buf.items[self.write_offset..];
         const use_fixed = self.fixed_index != NO_FIXED_FILE;
         const fd_or_idx = if (use_fixed) @as(i32, @intCast(self.fixed_index)) else self.fd;
-        // 修改原因：同一连接上可能同时存在 keep-alive 读 CQE 和新请求写 CQE；
-        // 给写操作打标记，完成时才能按真实操作类型分发，而不是靠 self.writing 猜。
+        // The same connection may have a keep-alive read CQE and a new-request write CQE in flight simultaneously;
+        // tag the write so completion can dispatch by real operation type instead of guessing from self.writing.
         const sqe = try self.rs.ringPtr().write(self.id | CLIENT_WRITE_USER_DATA_FLAG, fd_or_idx, to_send, 0);
         if (use_fixed) sqe.flags |= linux.IOSQE_FIXED_FILE;
         self.writing = true;
@@ -409,10 +409,10 @@ pub const RingSharedClient = struct {
                 // Disable Nagle — low-latency microservice calls
                 const one: i32 = 1;
                 _ = linux.setsockopt(self.fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, @ptrCast(&one), @sizeOf(i32));
-                // 修改原因：RingSharedClient 没有 fixed-file 槽位分配器；多个连接共用 slot 0 会互相覆盖 fd。
+                // RingSharedClient has no fixed-file slot allocator; multiple connections sharing slot 0 would overwrite each other's fd.
                 self.fixed_index = NO_FIXED_FILE;
                 if (self.write_buf.items.len > self.write_offset) {
-                    // 修改原因：连接建立前排队的首个请求必须先写出，再等响应；否则新建连接会先挂读或直接丢掉首包。
+                    // The first request queued before the connection is established must be written out before waiting for a response; otherwise a new connection would stall on read or drop the first packet.
                     self.flushWrite() catch {
                         self.onClose();
                     };
@@ -594,7 +594,7 @@ fn parseIpv4(ip_str: []const u8) !u32 {
         (@as(u32, octets[1]) << 16) |
         (@as(u32, octets[2]) << 8) |
         (@as(u32, octets[3]));
-    // 修改原因：connectRaw 会直接把 ip 写进 sockaddr.in.addr，返回值必须是网络字节序布局。
+    // connectRaw writes ip directly into sockaddr.in.addr, so the return value must be in network byte order.
     return std.mem.nativeToBig(u32, ip);
 }
 

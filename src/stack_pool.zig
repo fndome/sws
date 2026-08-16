@@ -6,8 +6,8 @@ const NO_READ_BUFFER_BID = @import("constants.zig").NO_READ_BUFFER_BID;
 const WORKSPACE_SENTINEL = @import("constants.zig").WORKSPACE_SENTINEL;
 const NO_LIVE_POS = @import("constants.zig").NO_LIVE_POS;
 
-/// StackPool: O(1) 连续数组连接池，替代 AutoHashMap。
-/// user_data = (gen_id << 32) | idx，防 FD 复用幽灵事件。
+/// StackPool: O(1) contiguous-array connection pool, replacing AutoHashMap.
+/// user_data = (gen_id << 32) | idx, defends against FD-reuse ghost events.
 pub fn StackPool(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -16,7 +16,7 @@ pub fn StackPool(comptime T: type) type {
         freelist: []u32,
         freelist_top: u32,
         capacity: usize,
-        /// 活跃槽位索引表，O(1) swap-remove。TTL 扫描只遍历此项。
+        /// Active-slot index table with O(1) swap-remove. TTL scan iterates only this.
         live: std.ArrayList(u32),
 
         pub fn init(allocator: Allocator, capacity: usize) !Self {
@@ -24,7 +24,7 @@ pub fn StackPool(comptime T: type) type {
             errdefer allocator.free(slots);
             const freelist = try allocator.alloc(u32, capacity);
             errdefer allocator.free(freelist);
-            // 修改原因：live 预分配失败时前面两个数组已经申请成功，必须用 errdefer 回收，避免初始化 OOM 泄漏。
+            // Defensive: if live preallocation fails, the two arrays above are already allocated, so an errdefer must reclaim them to avoid an init OOM leak.
             const live = try std.ArrayList(u32).initCapacity(allocator, capacity);
 
             for (freelist, 0..) |*f, i| {
@@ -40,11 +40,11 @@ pub fn StackPool(comptime T: type) type {
             };
         }
 
-        /// 预热：触碰每个 slot 的首字段，强制内核分配物理页，
-        /// 消除运行时冷启动 Page Fault 抖动。
+        /// Warmup: touch the first field of each slot to force the kernel to allocate physical pages,
+        /// eliminating cold-start Page Fault jitter at runtime.
         pub fn warmup(self: *Self) void {
             for (self.slots) |*slot| {
-                // 修改原因：allocator.alloc 返回未初始化内存，必须写入默认值以初始化 line5.sentinel 等调试/运行元数据。
+                // Defensive: allocator.alloc returns uninitialized memory, so default values must be written to initialize debug/runtime metadata like line5.sentinel.
                 slot.* = std.mem.zeroes(T);
                 if (@hasField(T, "line5")) {
                     slot.line5.sentinel = WORKSPACE_SENTINEL;
@@ -65,16 +65,16 @@ pub fn StackPool(comptime T: type) type {
             return self.freelist[self.freelist_top];
         }
 
-        /// 将 idx 写入活跃表，返回在 live 中的位置。
-        /// 调用方需将返回值写入 slot.active_list_pos。
+        /// Append idx to the active table and return its position in live.
+        /// The caller must write the return value into slot.active_list_pos.
         pub fn liveAdd(self: *Self, idx: u32) u32 {
             self.live.appendAssumeCapacity(idx);
             return @intCast(self.live.items.len - 1);
         }
 
-        /// swap-remove：用最后一个元素覆盖 list_pos，O(1)。
-        /// 返回被移过来的 idx（调用方需更新其 slot.active_list_pos = list_pos）。
-        /// 返回 null 表示移除的是尾部元素，无元素被移动，无需更新。
+        /// swap-remove: overwrite list_pos with the last element, O(1).
+        /// Returns the idx that was moved over (the caller must update its slot.active_list_pos = list_pos).
+        /// Returns null when the removed element was the tail, so nothing was moved and no update is needed.
         pub fn liveRemove(self: *Self, list_pos: u32) ?u32 {
             if (list_pos >= self.live.items.len) return null;
             const last = self.live.getLast();
@@ -107,7 +107,7 @@ pub inline fn unpackIdx(ud: u64) u32 {
     return @truncate(ud);
 }
 
-/// ── 缓存行子结构 ───────────────────────────────────────
+/// ── Cache-line substructures ───────────────────────────
 const CacheLine1 = extern struct {
     gen_id: u32 = 0,
     state: ConnState = .reading,
@@ -119,9 +119,9 @@ const CacheLine1 = extern struct {
     read_bid: u16 = 0,
     write_retries: u8 = 0,
     keep_alive: bool = false,
-    /// 当前窗口内请求计数（CQE 热路径防刷）
+    /// Request count in the current window (anti-flood on the CQE hot path)
     req_count: u32 = 0,
-    /// 当前限速窗口起始时间戳 (ms)
+    /// Start timestamp of the current rate-limit window (ms)
     req_window_ms: i64 = 0,
     _fill: [24]u8 = [_]u8{0} ** 24,
 };
@@ -139,7 +139,7 @@ const CacheLine2 = extern struct {
     is_writing: bool = false,
     conn_id: u64 = 0,
     active_list_pos: u32 = NO_LIVE_POS,
-    /// 连接创建时间戳 (ms)，用于绝对 TTL 硬超时
+    /// Connection creation timestamp (ms), used for absolute TTL hard timeout
     birth_ms: i64 = 0,
     _pad: [4]u8 = [_]u8{0} ** 4,
 };
@@ -157,9 +157,9 @@ const CacheLine3 = extern struct {
     large_buf_ptr: u64 = 0,
     large_buf_len: u32 = 0,
     large_buf_offset: u32 = 0,
-    /// ChunkStream 堆指针：IO 线程 feed → Worker dispatch
+    /// ChunkStream heap pointer: IO thread feed → Worker dispatch
     stream_ptr: u64 align(8) = 0,
-    /// 二级计算区：Worker Pool 移交时的预解析元数据 (JSON offset/length 等)
+    /// Secondary compute area: pre-parsed metadata (JSON offset/length, etc.) at Worker Pool handoff
     worker_scratch: [16]u8 = [_]u8{0} ** 16,
 };
 
@@ -174,8 +174,8 @@ const CacheLine4_6 = extern struct {
     /// This guarantees in-flight write iovecs are never corrupted
     /// by workspace union state switches (http→ws, ws→compute).
     response_buf_tier: u8 = 0,
-    /// 内核正在异步读取 write_iovs（writev SQE 已提交但 CQE 未到）。
-    /// 置位期间严禁对 Line4 做任何 memcpy / 重置 / iovec 修改。
+    /// The kernel is asynchronously reading write_iovs (writev SQE submitted but CQE not yet arrived).
+    /// While set, no memcpy / reset / iovec modification of Line4 is allowed.
     writev_in_flight: u8 = 0,
     _pad: [2]u8 = [_]u8{0} ** 2,
     response_buf_len: u32 = 0,
@@ -184,7 +184,7 @@ const CacheLine4_6 = extern struct {
         .{ .base = undefined, .len = 0 },
     },
     ws_write_queue_tail: u64 = 0,
-    /// 二级计算区：写路径临时暂存 (NATS sequence / 校验和 / 协议中间态)
+    /// Secondary compute area: write-path scratch (NATS sequence / checksum / protocol intermediate state)
     write_scratch: [48]u8 = [_]u8{0} ** 48,
     /// Reserved: formerly response_buf_ptr, ws_write_queue_head, ws_token_ptr,
     /// ws_token_len — dead fields removed, padding maintains 128 B cache line.
@@ -192,13 +192,13 @@ const CacheLine4_6 = extern struct {
 };
 
 const CacheLine5 = extern struct {
-    /// 哨兵魔数（WORKSPACE_SENTINEL），debug 时检测内存越界
+    /// Sentinel magic (WORKSPACE_SENTINEL), detects out-of-bounds writes in debug
     sentinel: u32 = WORKSPACE_SENTINEL,
-    /// 二级计算区：协议解析 / Worker Pool 移交 / Fiber 虚拟寄存器
+    /// Secondary compute area: protocol parse / Worker Pool handoff / Fiber virtual registers
     ws: SlotWorkspace = .{ .raw = [_]u8{0} ** 56 },
 };
 
-/// ── 二级计算区联合体 ───────────────────────────────────
+/// ── Secondary compute area union ───────────────────────
 pub const SlotWorkspace = extern union {
     http: HttpWork,
     websocket: WsWork,
@@ -213,11 +213,11 @@ pub const HttpWork = extern struct {
     content_length: u64 = 0,
     path_offset: u16 = 0,
     path_len: u16 = 0,
-    /// 修改原因：这里缓存 body 起点，而不是裸 header 结束下标，以兼容 "\r\n\r\n" 与 "\n\n"。
+    /// Defensive: cache the body start here, not the raw header-end index, to support both "\r\n\r\n" and "\n\n".
     headers_end: u16 = 0,
-    /// 上次短读的 buffer ID（用于跨 TCP 分片的 header 拼包）
+    /// Buffer ID of the last short read (for reassembling headers across TCP segments)
     pending_bid: u16 = NO_READ_BUFFER_BID,
-    /// 上次短读已累积的字节数
+    /// Number of bytes accumulated so far from the last short read
     pending_len: u16 = 0,
     _fill: [30]u8 = [_]u8{0} ** 30,
 };
@@ -255,13 +255,13 @@ comptime {
     }
 }
 
-/// ── 连接槽位 (384 bytes, <400 budget) ──────────────────
+/// ── Connection slot (384 bytes, <400 budget) ───────────
 ///
-/// 五组子结构各占独立缓存行，IO 循环最热路径只碰 line1。
+/// The five substructures each occupy their own cache line; the IO loop's hottest path only touches line1.
 ///   line1 ( 64B): fd, gen_id, state, write_offset — CQE dispatch
 ///   line2 ( 64B): user_id, last_active_ms, conn_id, birth_ms — TTL scan
-///   line3 ( 64B): 异步锚点 + 大报文 — Worker Pool / LargeBufferPool
-///   line4 (128B): response_buf, write_iovs, WS queue — 写路径低频
+///   line3 ( 64B): async anchors + oversized requests — Worker Pool / LargeBufferPool
+///   line4 (128B): response_buf, write_iovs, WS queue — low-frequency write path
 pub const StackSlot = extern struct {
     line1: CacheLine1 align(64),
     line2: CacheLine2,

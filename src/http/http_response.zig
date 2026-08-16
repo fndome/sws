@@ -77,7 +77,7 @@ pub fn respond(self: *AsyncServer, conn: *Connection, status: u16, text: []const
 }
 
 pub fn respondWithHeader(self: *AsyncServer, conn: *Connection, status: u16, text: []const u8, extra_headers: []const u8) void {
-    // 修改原因：extra_headers 来自调用方，必须按实际长度扩容，否则长 header 会 bufPrint 失败并误回 500。
+    // extra_headers comes from the caller, so size by its actual length; otherwise a long header makes bufPrint fail and returns a spurious 500.
     if (!ensureWriteBuf(self, conn, headerOnlyCapacity(extra_headers.len))) {
         self.closeConn(conn.id, conn.fd);
         return;

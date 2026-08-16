@@ -47,7 +47,7 @@ pub fn validateUrlHost(host: []const u8) !void {
     if (host.len == 0) return error.InvalidUrl;
     for (host) |ch| {
         if (isCtlOrSpace(ch)) return error.InvalidUrl;
-        // 修改原因：当前客户端不解析 URL userinfo，@ 出现在 authority 中不能被当成 host 字符写入 Host 头。
+        // The client does not parse URL userinfo; '@' in the authority must not be treated as a host character written into the Host header.
         if (ch == '@') return error.InvalidUrl;
     }
 }
@@ -75,7 +75,7 @@ fn firstPathOrQueryIndex(rest: []const u8) ?usize {
 }
 
 fn stripFragmentTarget(target: []const u8) []const u8 {
-    // 修改原因：URL fragment 只在客户端本地使用，不能出现在 HTTP request-target 中。
+    // URL fragments are client-local only and must not appear in the HTTP request-target.
     const no_fragment = target[0..(std.mem.indexOfScalar(u8, target, '#') orelse target.len)];
     if (no_fragment.len == 0) return "/";
     return no_fragment;
@@ -83,7 +83,7 @@ fn stripFragmentTarget(target: []const u8) []const u8 {
 
 pub fn parseUrl(allocator: Allocator, url: []const u8) !ParsedUrl {
     var rest = url;
-    // 修改原因：URL scheme 大小写不敏感，HTTP://host 这类合法 URL 不能被误判成坏 host/port。
+    // URL scheme is case-insensitive; a valid URL like HTTP://host must not be misparsed as a bad host/port.
     const is_tls = if (std.ascii.startsWithIgnoreCase(rest, "https://")) blk: {
         rest = rest["https://".len..];
         break :blk true;
@@ -91,26 +91,26 @@ pub fn parseUrl(allocator: Allocator, url: []const u8) !ParsedUrl {
         rest = rest["http://".len..];
         break :blk false;
     } else false;
-    // 修改原因：合法 URL 可以省略路径但直接带 query，例如 http://host?x=1；此时也必须从 host 中切出去。
+    // A valid URL may omit the path but still carry a query, e.g. http://host?x=1; that must still be split off from the host.
     const path_start = firstPathOrQueryIndex(rest);
     const host_port = if (path_start) |p| rest[0..p] else rest;
     const path = if (path_start) |p| stripFragmentTarget(rest[p..]) else "/";
     const colon = std.mem.lastIndexOfScalar(u8, host_port, ':');
     const host = if (colon) |c| host_port[0..c] else host_port;
     if (std.mem.indexOfScalar(u8, host, ':') != null) return error.InvalidUrl;
-    // 修改原因：host 和 request-target 会直接拼进请求行/Host 头，必须拒绝 CR/LF/空白控制字符，避免请求头注入。
-    // 当前客户端只支持普通 host[:port] authority，多冒号或 IPv6 bracket 形式不能靠 lastIndex 静默解析。
+    // host and request-target are spliced directly into the request line/Host header, so CR/LF/control whitespace must be rejected to prevent header injection.
+    // The client only supports a plain host[:port] authority; multi-colon or bracketed IPv6 forms cannot be silently parsed via lastIndex.
     try validateUrlHost(host);
     try validateRequestTarget(path);
     const port: u16 = if (colon) |c| blk: {
         const port_text = host_port[c + 1 ..];
-        // 修改原因：显式端口写错时不能静默回退到 80，否则请求会发到错误上游。
+        // A malformed explicit port must not silently fall back to 80, or the request would be sent to the wrong upstream.
         if (port_text.len == 0) return error.InvalidUrl;
         break :blk std.fmt.parseInt(u16, port_text, 10) catch return error.InvalidUrl;
     } else if (is_tls) 443 else 80;
     const host_dup = try allocator.dupe(u8, host);
     errdefer allocator.free(host_dup);
-    // 修改原因：HTTP/1.1 Host 必须保留显式端口；连接用 host，Host 头用 authority。
+    // The HTTP/1.1 Host header must keep the explicit port; the host is used for connecting while authority is used for the Host header.
     const authority_dup = try allocator.dupe(u8, host_port);
     return .{ .host = host_dup, .authority = authority_dup, .port = port, .path = path, .tls = is_tls };
 }
@@ -120,7 +120,7 @@ pub fn parseResponse(allocator: Allocator, data: []const u8) !Response {
 }
 
 pub fn parseResponseForMethod(allocator: Allocator, data: []const u8, method: []const u8) !Response {
-    // 修改原因：HEAD 响应的 Content-Length 只描述假想正文，解析阶段必须沿用请求方法，否则会把合法 HEAD 响应误判成未读完整。
+    // For HEAD responses Content-Length describes only a hypothetical body; parsing must honor the request method or a valid HEAD response would be misjudged as incompletely read.
     const total_len = (try responseCompleteLenForMethod(data, method)) orelse return error.IncompleteResponse;
     const bounds = findHeaderEnd(data[0..total_len]) orelse return error.InvalidResponse;
     const first_line_end = std.mem.indexOfScalar(u8, data, '\r') orelse
@@ -171,7 +171,7 @@ fn getSingleHeaderValue(headers: []const u8, name: []const u8) !?[]const u8 {
         if (std.ascii.startsWithIgnoreCase(line, name)) {
             const after = line[name.len..];
             if (after.len > 0 and after[0] == ':') {
-                // 修改原因：响应 Content-Length 重复会让 keep-alive 响应边界不唯一，客户端不能只信第一个值。
+                // A duplicate response Content-Length makes the keep-alive response boundary ambiguous; the client cannot trust only the first value.
                 if (seen != null) return error.DuplicateHeader;
                 seen = std.mem.trim(u8, after[1..], " \t\r\n");
             }
@@ -204,7 +204,7 @@ fn responseHeaderHasToken(headers: []const u8, name: []const u8, token: []const 
 pub fn responseWantsClose(data: []const u8) bool {
     const bounds = findHeaderEnd(data) orelse return false;
     const headers = data[0..bounds.header_end];
-    // 修改原因：上游声明 Connection: close 时，该 TCP 连接不能放回 keep-alive 池等待复用。
+    // When the upstream declares Connection: close, the TCP connection must not be returned to the keep-alive pool for reuse.
     return responseHeaderHasToken(headers, "Connection", "close");
 }
 
@@ -213,7 +213,7 @@ fn validateResponseHeaderLines(headers: []const u8) !void {
     _ = lines.next() orelse return error.InvalidResponse;
     while (lines.next()) |raw_line| {
         const line = std.mem.trimEnd(u8, raw_line, "\r");
-        // 修改原因：响应头行会参与 keep-alive 边界判断，内嵌 CR、缺冒号或非法字段名都不能被静默忽略。
+        // Response header lines participate in keep-alive boundary determination; embedded CR, a missing colon, or an invalid field name must not be silently ignored.
         if (line.len == 0 or std.mem.indexOfScalar(u8, line, '\r') != null) return error.InvalidResponse;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidResponse;
         const field_name = line[0..colon];
@@ -228,21 +228,21 @@ fn parseStatusCode(first_line: []const u8) !u16 {
     var parts = std.mem.splitScalar(u8, first_line, ' ');
     const version = parts.next() orelse return error.InvalidResponse;
     const code = parts.next() orelse return error.InvalidResponse;
-    // 修改原因：上游状态行坏掉时不能伪装成 500 正常响应；调用方需要知道这是非法 HTTP 响应。
+    // A corrupt upstream status line must not be disguised as a normal 500 response; the caller needs to know this is an invalid HTTP response.
     if (!std.mem.eql(u8, version, "HTTP/1.1") and !std.mem.eql(u8, version, "HTTP/1.0")) return error.InvalidResponse;
-    // 修改原因：HTTP status-code 必须正好 3 位数字，parseInt 会把 0200 这类畸形码放宽成 200。
+    // The HTTP status-code must be exactly 3 digits; parseInt would relax a malformed code like 0200 into 200.
     if (code.len != 3) return error.InvalidResponse;
     for (code) |ch| {
         if (ch < '0' or ch > '9') return error.InvalidResponse;
     }
     const status = std.fmt.parseInt(u16, code, 10) catch return error.InvalidResponse;
-    // 修改原因：HTTP status-code 只定义 100-599；放行 6xx-9xx 会把上游坏响应当成正常响应边界复用连接。
+    // HTTP status-codes are only defined for 100-599; allowing 6xx-9xx would treat an upstream bad response as a normal boundary and reuse the connection.
     if (status < 100 or status > 599) return error.InvalidResponse;
     return status;
 }
 
 fn responseMayOmitContentLength(status: u16) bool {
-    // 修改原因：205 Reset Content 也禁止响应 body，不能按普通 2xx 去等待 Content-Length 正文。
+    // 205 Reset Content also forbids a response body, so it cannot wait for a Content-Length body like an ordinary 2xx.
     return status == 204 or status == 205 or status == 304;
 }
 
@@ -251,7 +251,7 @@ fn methodForbidsResponseBody(method: []const u8) bool {
 }
 
 fn parseResponseContentLength(value: []const u8) !usize {
-    // 修改原因：响应 Content-Length 也是协议边界，parseInt 会接受前导零这类非规范值并放宽响应边界判断。
+    // Response Content-Length is also a protocol boundary; parseInt would accept non-canonical values like leading zeros and relax the boundary check.
     if (value.len == 0) return error.InvalidContentLength;
     if (value.len > 1 and value[0] == '0') return error.InvalidContentLength;
     for (value) |ch| {
@@ -268,22 +268,22 @@ pub fn responseCompleteLenForMethod(data: []const u8, method: []const u8) !?usiz
     const bounds = findHeaderEnd(data) orelse return null;
     const headers = data[0..bounds.header_end];
     try validateResponseHeaderLines(headers);
-    // 修改原因：无 header 字段的响应（如 "204 No Content\r\n\r\n"）里 headers 只含状态行、
-    // 不含其后的 "\r\n"，必须回到 data 里找状态行结尾，否则会误报 InvalidResponse。
+    // For responses with no header fields (e.g. "204 No Content\r\n\r\n"), headers contains only the status line,
+    // without the trailing "\r\n", so the status-line end must be found in data or InvalidResponse is misreported.
     const first_line_end = std.mem.indexOfScalar(u8, data, '\r') orelse
         std.mem.indexOfScalar(u8, data, '\n') orelse
         return error.InvalidResponse;
     const status = try parseStatusCode(headers[0..first_line_end]);
-    // 修改原因：客户端还没有实现 1xx interim response 折叠，不能把 100 Continue 当成最终响应返回。
+    // The client does not implement folding of 1xx interim responses, so 100 Continue cannot be returned as the final response.
     if (status < 200) return error.InformationalResponseUnsupported;
     if (getHeaderValue(headers, "Transfer-Encoding")) |_| {
-        // 修改原因：当前客户端只按 Content-Length 做响应边界，不会解码任何 Transfer-Encoding。
+        // The client only frames responses by Content-Length and never decodes any Transfer-Encoding.
         return error.TransferEncodingUnsupported;
     }
     const content_len_header = try getSingleHeaderValue(headers, "Content-Length");
     const body_forbidden = responseMayOmitContentLength(status) or methodForbidsResponseBody(method);
     const content_len = try responseContentLen(status, content_len_header, body_forbidden);
-    // 修改原因：上游 keep-alive 时连接不会 EOF，必须按 Content-Length 判断响应边界。
+    // On keep-alive the connection will not EOF, so the response boundary must be determined by Content-Length.
     const header_total = std.math.add(usize, bounds.header_end, bounds.sep_len) catch return error.InvalidResponse;
     const total = std.math.add(usize, header_total, content_len) catch return error.InvalidResponse;
     if (data.len < total) return null;
@@ -294,16 +294,16 @@ fn responseContentLen(status: u16, content_len_header: ?[]const u8, body_forbidd
     if (body_forbidden) {
         if (content_len_header) |value| {
             const declared_len = try parseResponseContentLength(value);
-            // 修改原因：204/205 没有响应 body，非 0 Content-Length 不能驱动读取正文或返回伪 body。
+            // 204/205 have no response body; a non-zero Content-Length must not drive body reads or return a fake body.
             if ((status == 204 or status == 205) and declared_len != 0) return error.InvalidResponse;
         }
-        // 修改原因：HEAD/304/205 的 Content-Length 不能作为当前响应读取边界。
+        // Content-Length for HEAD/304/205 cannot serve as the read boundary for the current response.
         return 0;
     }
     if (content_len_header) |value| {
         return parseResponseContentLength(value);
     }
-    // 修改原因：200 等可带 body 响应缺少长度时无法在 keep-alive 连接上确定边界，不能按空 body 复用连接。
+    // When a body-capable response (e.g. 200) lacks a length, the boundary cannot be determined on a keep-alive connection, so it cannot be treated as an empty body and the connection reused.
     return error.MissingContentLength;
 }
 
