@@ -138,7 +138,7 @@ pub const RingSharedClient = struct {
     }
 
     fn resolveHost(self: *RingSharedClient, host: []const u8) !u32 {
-        if (parseIpv4(host)) |ip| return ip;
+        if (parseIpv4(host) catch null) |ip| return ip;
         if (self.dns) |dns| {
             return dns.resolve(host) catch return error.InvalidHost;
         }

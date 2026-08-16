@@ -169,7 +169,9 @@ pub const HttpClient = struct {
                 @atomicStore(bool, &ctx.done, true, .release);
             }
         }
-        if (self.tls_client_config) |*tc| tc.deinit();
+        if (build_options.tls_enabled) {
+            if (self.tls_client_config) |*tc| tc.deinit();
+        }
         self.allocator.destroy(self);
     }
 
