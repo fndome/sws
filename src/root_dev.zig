@@ -12,3 +12,14 @@ pub const WsServer = @import("ws/server.zig").WsServer;
 pub const WsHandler = @import("ws/server.zig").WsHandler;
 pub const Frame = @import("ws/types.zig").Frame;
 pub const Opcode = @import("ws/types.zig").Opcode;
+
+test {
+    // Pure modules with host-runnable tests (no io_uring/linux dependency).
+    _ = @import("client/http_parse.zig");
+    _ = @import("http/route_match.zig");
+    _ = @import("http/write_progress.zig");
+    _ = @import("shared/tcp_stream_helpers.zig");
+    _ = @import("dns/packet.zig");
+    _ = @import("dns/cache.zig");
+    _ = @import("spsc_ringbuffer.zig");
+}
