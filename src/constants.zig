@@ -51,3 +51,9 @@ pub const UDP_RECV_POOL_SIZE: u16 = 256;
 pub const TIER_SIZES = [_]usize{ 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536 };
 pub const TIER_COUNT = TIER_SIZES.len;
 
+/// TLS maximum plaintext record size (RFC 8446 §5.2); plaintext is chunked
+/// into 16KB records before encryption on both server and client paths.
+pub const TLS_MAX_PLAINTEXT: usize = 16384;
+/// TLS ciphertext expansion overhead (record header + AEAD tag + padding).
+pub const TLS_CIPHERTEXT_OVERHEAD: usize = 2048;
+

@@ -10,6 +10,8 @@ const TlsStream = @import("../tls/tls.zig").TlsStream;
 const build_options = @import("build_options");
 
 const write_progress = @import("write_progress.zig");
+const TLS_MAX_PLAINTEXT = @import("../constants.zig").TLS_MAX_PLAINTEXT;
+const TLS_CIPHERTEXT_OVERHEAD = @import("../constants.zig").TLS_CIPHERTEXT_OVERHEAD;
 
 /// Free per-connection write buffers and reset write bookkeeping after a
 /// response write completes. Leaves write_offset/write_headers_len and the
@@ -249,12 +251,12 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
 
     const header_len = @min(conn.write_headers_len, resp_buf.len);
 
-    const max_ciphertext = @as(usize, 16384) + 2048;
+    const max_ciphertext = TLS_MAX_PLAINTEXT + TLS_CIPHERTEXT_OVERHEAD;
     if (conn.tls_ciphertext == null) {
         conn.tls_ciphertext = self.allocator.alloc(u8, max_ciphertext) catch return error.OutOfMemory;
     }
     var ciphertext_buf = conn.tls_ciphertext.?;
-    var plaintext_buf: [16384]u8 = [_]u8{0} ** 16384;
+    var plaintext_buf: [TLS_MAX_PLAINTEXT]u8 = [_]u8{0} ** TLS_MAX_PLAINTEXT;
     var plaintext_len: usize = 0;
 
     if (conn.write_offset < header_len) {

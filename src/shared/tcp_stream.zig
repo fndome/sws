@@ -6,6 +6,7 @@ const build_options = @import("build_options");
 const RingShared = @import("ring_shared.zig").RingShared;
 const DnsResolver = @import("../dns/resolver.zig").DnsResolver;
 const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
+const TLS_MAX_PLAINTEXT = @import("../constants.zig").TLS_MAX_PLAINTEXT;
 const logErr = @import("../async_logger.zig").logErr;
 const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 const HandshakeStep = if (build_options.tls_enabled) @import("../tls/tls.zig").HandshakeStep else struct {};
@@ -269,7 +270,7 @@ pub const RingSharedClient = struct {
             return;
         }
         const remaining = self.write_buf.items[self.write_offset..];
-        const to_encrypt = if (remaining.len > 16384) remaining[0..16384] else remaining;
+        const to_encrypt = if (remaining.len > TLS_MAX_PLAINTEXT) remaining[0..TLS_MAX_PLAINTEXT] else remaining;
         if (self.tls_ciphertext_buf == null) {
             self.tls_ciphertext_buf = self.allocator.alloc(u8, CLIENT_TLS_SEND_BUF) catch return error.OutOfMemory;
         }
