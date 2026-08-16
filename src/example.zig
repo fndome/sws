@@ -31,16 +31,16 @@ pub const SubmitQueue = @import("next/queue.zig").SubmitQueue;
 
 // ========== 高级范式：用户自定义 io_uring 提交队列 ==========
 // 用户在工作线程中创建 SubmitQueue，push Next（含 execute + on_complete 回调），
-// 注册�?AsyncServer，IO 线程在每次事件循环中消费队列、提�?SQE、回�?completion�?
+// 注册到 AsyncServer，IO 线程在每次事件循环中消费队列、提交 SQE、回调 completion。
 //
-// 典型场景：异�?MySQL 查询（在 io_uring 上执�?READV/WRITEV/SENDTO/RECVFROM�?
+// 典型场景：异步 MySQL 查询（在 io_uring 上执行 READV/WRITEV/SENDTO/RECVFROM）
 //
-// 用法示意�?
+// 用法示意：
 // ====================================================================
 // const mysql: type = struct {
 //     const QueryCtx = struct {
 //         fd: i32,            // MySQL TCP 连接 fd
-//         buf: [4096]u8,      // �?写缓冲区
+//         buf: [4096]u8,      // 读/写缓冲区
 //         done: bool = false,
 //     };
 //
@@ -65,7 +65,7 @@ pub const SubmitQueue = @import("next/queue.zig").SubmitQueue;
 //             .on_cqe = struct {
 //                 fn c(cqe: *const linux.io_uring_cqe) void {
 //                     if (cqe.res >= 0) {
-//                         // 写成功，提交 READV 读响�?
+//                         // 写成功，提交 READV 读响应
 //                         _ = queue.push(.{
 //                             .prepare = struct {
 //                                 fn p2(sqe2: *linux.io_uring_sqe) void {
@@ -90,15 +90,15 @@ pub const SubmitQueue = @import("next/queue.zig").SubmitQueue;
 //                 }
 //             }.c,
 //         })) {
-//             // 队列满，降级或等�?
+//             // 队列满，降级或等待
 //         }
 //     }
 // };
 // ====================================================================
 
 pub const IoUringUserPattern = struct {
-    /// 创建一�?SubmitQueue，注册到 server，在 worker/handler �?push 任务�?
-    /// IO 线程自动消费、提交、回调，无需用户干预�?
+    /// 创建一个 SubmitQueue，注册到 server，在 worker/handler 中 push 任务。
+    /// IO 线程自动消费、提交、回调，无需用户干预。
     pub fn createAndRegister(server: *AsyncServer) !*SubmitQueue {
         const q = try server.allocator.create(SubmitQueue);
         q.* = SubmitQueue.init();
@@ -143,7 +143,7 @@ const Example = struct {
     fn httpMethodHandler(allocator: Allocator, ctx: *Context) anyerror!void {
         const method = ctx.method();
         const request_body = ctx.requestBody();
-        // 修改原因：自测需要覆盖常�?HTTP 方法，并验证 PUT/PATCH/POST �?JSON body 会被业务层读到后�?JSON 返回�?
+        // 修改原因：自测需要覆盖常见 HTTP 方法，并验证 PUT/PATCH/POST 的 JSON body 会被业务层读到后按 JSON 返回。
         const body = if (request_body.len > 0)
             try std.fmt.allocPrint(allocator, "{{\"method\":\"{s}\",\"body\":{s}}}", .{ method, request_body })
         else
@@ -164,7 +164,7 @@ const Example = struct {
 
     fn readPortEnv(default_port: u16) u16 {
         const raw = std.c.getenv("SWS_EXAMPLE_PORT") orelse return default_port;
-        // 修改原因：自测脚本需要可切换端口，避免旧测试进程占用固定 9090 导致无法验证�?
+        // 修改原因：自测脚本需要可切换端口，避免旧测试进程占用固定 9090 导致无法验证。
         return std.fmt.parseInt(u16, std.mem.span(raw), 10) catch default_port;
     }
 
