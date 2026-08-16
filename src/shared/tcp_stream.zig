@@ -10,11 +10,14 @@ const logErr = @import("../async_logger.zig").logErr;
 const TlsStream = if (build_options.tls_enabled) @import("../tls/tls.zig").TlsStream else struct {};
 const HandshakeStep = if (build_options.tls_enabled) @import("../tls/tls.zig").HandshakeStep else struct {};
 const tls_lib = @import("tls");
+const tcp_stream_helpers = @import("tcp_stream_helpers.zig");
+const CLIENT_WRITE_USER_DATA_FLAG = tcp_stream_helpers.CLIENT_WRITE_USER_DATA_FLAG;
+const isWriteCqe = tcp_stream_helpers.isWriteCqe;
+const hasConnectSqeCapacity = tcp_stream_helpers.hasConnectSqeCapacity;
 
 pub const CLIENT_READ_BUF = 16384;
 pub const CLIENT_TLS_RECV_BUF = if (build_options.tls_enabled) tls_lib.input_buffer_len else CLIENT_READ_BUF;
 pub const CLIENT_TLS_SEND_BUF = if (build_options.tls_enabled) tls_lib.output_buffer_len else CLIENT_READ_BUF;
-const CLIENT_WRITE_USER_DATA_FLAG: u64 = 1 << 61;
 
 fn clientDispatch(ptr: *anyopaque, user_data: u64, res: i32) void {
     const self: *RingSharedClient = @ptrCast(@alignCast(ptr));
@@ -591,16 +594,6 @@ fn parseIpv4(ip_str: []const u8) !u32 {
     return std.mem.nativeToBig(u32, ip);
 }
 
-fn isWriteCqe(user_data: u64) bool {
-    return (user_data & CLIENT_WRITE_USER_DATA_FLAG) != 0;
-}
-
-fn hasConnectSqeCapacity(ready: usize, capacity: usize, timeout_ms: u32) bool {
-    if (ready > capacity) return false;
-    const needed: usize = if (timeout_ms > 0) 2 else 1;
-    return capacity - ready >= needed;
-}
-
 fn noopClientData(stream: *RingSharedClient, ctx: ?*anyopaque, data: []u8) void {
     _ = stream;
     _ = ctx;
@@ -610,18 +603,6 @@ fn noopClientData(stream: *RingSharedClient, ctx: ?*anyopaque, data: []u8) void 
 fn noopClientClose(stream: *RingSharedClient, ctx: ?*anyopaque) void {
     _ = stream;
     _ = ctx;
-}
-
-test "RingSharedClient distinguishes write CQE user data" {
-    const base = @as(u64, 1) << 62;
-    try std.testing.expect(!isWriteCqe(base));
-    try std.testing.expect(isWriteCqe(base | CLIENT_WRITE_USER_DATA_FLAG));
-}
-
-test "RingSharedClient connect submit checks timeout SQE capacity" {
-    try std.testing.expect(hasConnectSqeCapacity(254, 256, 5000));
-    try std.testing.expect(!hasConnectSqeCapacity(255, 256, 5000));
-    try std.testing.expect(hasConnectSqeCapacity(255, 256, 0));
 }
 
 test "RingSharedClient socket fd conversion checks errno before casting" {
