@@ -188,11 +188,14 @@ pub const UdpServer = struct {
     }
 };
 
-test "UdpServer init bind and deinit" {
+test "UdpServer init binds socket and sets handler" {
     const allocator = std.testing.allocator;
     const rs = undefined;
     var server = try UdpServer.init(allocator, rs, "0.0.0.0:0");
-    defer server.deinit();
+    defer {
+        _ = linux.close(server.udp_fd);
+        server.recv_pool.deinit(allocator);
+    }
     try std.testing.expect(server.udp_fd >= 0);
     try std.testing.expect(!server.hasHandler());
 

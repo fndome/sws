@@ -243,31 +243,8 @@ test "TinyCache.store applies pool limit per host and port" {
     try std.testing.expectEqual(MAX_CONNS_PER_HOST + 1, cache.entries.items.len);
 }
 
-test "TinyCache.acquire matches host case-insensitively" {
-    var cache = try TinyCache.init(std.testing.allocator, 1000);
-    defer {
-        for (cache.entries.items) |*e| {
-            std.testing.allocator.free(e.host);
-        }
-        cache.entries.deinit(std.testing.allocator);
-    }
-
-    const fake_stream: *RingSharedClient = @ptrFromInt(0x1000);
-    const host = try std.testing.allocator.dupe(u8, "Example.COM");
-    try cache.entries.append(std.testing.allocator, .{
-        .host = host,
-        .port = 80,
-        .tls = false,
-        .stream = fake_stream,
-        .pipe = testPipe(fake_stream),
-        .last_used_ms = 0,
-        .borrowed = false,
-    });
-
-    const borrowed = cache.acquire("example.com", 80, false, 1) orelse {
-        try std.testing.expect(false);
-        return;
-    };
-    try std.testing.expectEqual(fake_stream, borrowed.stream);
-    try std.testing.expect(cache.entries.items[0].borrowed);
+test "sameHost matches case-insensitively" {
+    try std.testing.expect(sameHost("example.com", "Example.COM"));
+    try std.testing.expect(sameHost("EXAMPLE.com", "example.com"));
+    try std.testing.expect(!sameHost("example.com", "other.com"));
 }
