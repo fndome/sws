@@ -99,39 +99,11 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
     const nread = @as(usize, @intCast(res));
 
     var plaintext_buf: [BUFFER_SIZE]u8 = [_]u8{0} ** BUFFER_SIZE;
-    var plaintext_len: usize = 0;
-    var tls_decrypted = false;
-    if (build_options.tls_enabled) {
-
-        if (conn.tls) |tls_stream| {
-            const decrypted = tls_stream.read(read_buf[0..nread], &plaintext_buf) catch |err| {
-                if (err == error.TlsConnectionClosed) {
-                    self.buffer_pool.markReplenish(bid);
-                    conn.read_len = 0;
-                    self.closeConn(conn_id, conn.fd);
-                    return;
-                }
-                self.buffer_pool.markReplenish(bid);
-                conn.read_len = 0;
-                self.closeConn(conn_id, conn.fd);
-                return;
-            };
-            plaintext_len = decrypted;
-            if (decrypted == 0) {
-                self.buffer_pool.markReplenish(bid);
-                conn.read_bid = NO_READ_BUFFER_BID;
-                conn.read_len = 0;
-                self.submitRead(conn_id, conn) catch |err_sub| {
-                    logErr("submitRead after TLS WANT_READ: {s}", .{@errorName(err_sub)});
-                    self.closeConn(conn_id, conn.fd);
-                };
-                return;
-            }
-            self.buffer_pool.markReplenish(bid);
-            tls_decrypted = true;
-            bid = NO_READ_BUFFER_BID;
-        }
-    }
+    const tls = tlsDecryptRead(self, conn_id, conn, bid, read_buf[0..nread], &plaintext_buf);
+    if (!tls.proceed) return;
+    const plaintext_len = tls.plaintext_len;
+    const tls_decrypted = tls.decrypted;
+    bid = tls.bid;
 
     var effective_buf: []const u8 = if (build_options.tls_enabled and tls_decrypted) plaintext_buf[0..plaintext_len] else read_buf[0..nread];
     var effective_nread = if (build_options.tls_enabled and tls_decrypted) plaintext_len else nread;
@@ -139,43 +111,11 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
     var reassembled_header = false;
     var combo: [MAX_REASSEMBLED_HEADER_SIZE]u8 = undefined;
 
-    if (self.connSlot(conn)) |slot| {
-        // TLS decrypt reuses plaintext buffer for effective_buf, but if header
-        // spans reads, the plaintext is on the stack and will be overwritten.
-        // Use heap save (slice to slot.line3.pending_buffer_ptr) for TLS path.
-        // For plaintext path, use io_uring bid as before.
-        if (!build_options.tls_enabled or !tls_decrypted or blk: {
-            const hw = sticker.httpWork(slot);
-            break :blk hw.pending_len > 0 and hw.pending_bid == NO_READ_BUFFER_BID and slot.line3.pending_buffer_ptr != 0;
-        }) {
-            const hw = sticker.httpWork(slot);
-        if (hw.pending_len > 0 and (hw.pending_bid != NO_READ_BUFFER_BID or slot.line3.pending_buffer_ptr != 0)) {
-            const prev_len: usize = @intCast(hw.pending_len);
-            var saved_heap: ?[]u8 = null;
-            const prev_buf: []const u8 = if (slot.line3.pending_buffer_ptr != 0) blk: {
-                const saved: []u8 = @as([*]u8, @ptrFromInt(slot.line3.pending_buffer_ptr))[0..prev_len];
-                // 修改原因：超过两段的 header 重组不能只依赖上一个 buffer id，累计片段必须从堆副本恢复。
-                saved_heap = saved;
-                slot.line3.pending_buffer_ptr = 0;
-                hw.header_len = 0;
-                break :blk saved;
-            } else blk: {
-                pending_to_free = hw.pending_bid;
-                break :blk self.buffer_pool.getReadBuf(hw.pending_bid)[0..prev_len];
-            };
-            const copy_prev_len = @min(prev_buf.len, combo.len);
-            const cur_len = @min(effective_nread, combo.len - copy_prev_len);
-            @memcpy(combo[0..copy_prev_len], prev_buf[0..copy_prev_len]);
-            @memcpy(combo[copy_prev_len..][0..cur_len], effective_buf[0..cur_len]);
-            effective_buf = combo[0 .. copy_prev_len + cur_len];
-            effective_nread = copy_prev_len + cur_len;
-            reassembled_header = true;
-            if (saved_heap) |saved| self.allocator.free(saved);
-            hw.pending_bid = NO_READ_BUFFER_BID;
-            hw.pending_len = 0;
-        }
-    }
-    } // conn.pool_idx guard for header reassembly
+    const reassembly = reassembleHeader(self, conn, effective_buf, effective_nread, &combo, tls_decrypted);
+    effective_buf = reassembly.effective_buf;
+    effective_nread = reassembly.effective_nread;
+    reassembled_header = reassembly.reassembled_header;
+    pending_to_free = reassembly.pending_to_free;
 
     if (!build_options.tls_enabled or !tls_decrypted) {
         if (conn.read_len > 0 and conn.read_bid != pending_to_free) {
@@ -347,95 +287,7 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         }
     }
 
-    const body_incomplete = brk: {
-        const slot = self.connSlot(conn) orelse break :brk false;
-        const hw3 = sticker.httpWork(slot);
-        if (hw3.content_length == 0) break :brk false;
-        const headers_end = if (hw3.headers_end > 0) hw3.headers_end else effective_nread;
-        const body_avail: usize = if (effective_nread > headers_end) effective_nread - headers_end else 0;
-        break :brk body_avail < hw3.content_length;
-    };
-
-    if (body_incomplete) {
-        const slot = self.connSlot(conn).?;
-        const hw4 = sticker.httpWork(slot);
-        const headers_end = if (hw4.headers_end > 0) hw4.headers_end else effective_nread;
-        if (!fitsLargeBodyBuffer(hw4.content_length)) {
-            // 修改原因：LargeBufferPool 每块只有 1MB；继续用 min(content_length, large_buf.len)
-            // 会把超大请求体截断后交给业务层，并把剩余字节留在连接里污染后续请求。
-            self.buffer_pool.markReplenish(bid);
-            conn.read_len = 0;
-            conn.keep_alive = false;
-            self.respond(conn, 413, "Content Too Large");
-            return;
-        }
-        if (reassembled_header or (build_options.tls_enabled and tls_decrypted)) {
-            // 修改原因：reassembled_header 时 effective_buf 指�?combo 栈上副本；TLS 解密时 effective_buf 指�?plaintext_buf 栈上副本。
-            // 进入异步 body 读取后栈已展开，必须�?header 保存�?heap，否则 processBodyRequest 会读到脏数据�?
-            const header_copy = self.allocator.dupe(u8, effective_buf[0..headers_end]) catch {
-                self.buffer_pool.markReplenish(bid);
-                conn.read_len = 0;
-                conn.keep_alive = false;
-                self.respond(conn, 500, "Internal Server Error");
-                return;
-            };
-            slot.line3.pending_buffer_ptr = @intFromPtr(header_copy.ptr);
-            hw4.header_len = @intCast(header_copy.len);
-        }
-        if (headers_end >= effective_nread) {
-            const large_buf = self.large_pool.acquire() orelse {
-                self.buffer_pool.markReplenish(bid);
-                conn.read_len = 0;
-                conn.keep_alive = false;
-                self.respond(conn, 413, "Content Too Large");
-                return;
-            };
-            slot.line3.large_buf_ptr = @intFromPtr(large_buf.ptr);
-            slot.line3.large_buf_len = @intCast(hw4.content_length);
-            slot.line3.large_buf_offset = 0;
-
-            conn.read_len = 0;
-            conn.state = .receiving_body;
-            self.submitBodyRead(conn, large_buf, slot) catch {
-                // 修改原因：body read SQE 提交失败后不会再进入 processBodyRequest，必须归还之前保留的 header read buffer。
-                self.buffer_pool.markReplenish(bid);
-                conn.read_bid = NO_READ_BUFFER_BID;
-                conn.read_len = 0;
-                self.large_pool.release(large_buf);
-                slot.line3.large_buf_ptr = 0;
-                self.closeConn(conn_id, conn.fd);
-            };
-            return;
-        } else {
-            const body_fragment = effective_buf[headers_end..effective_nread];
-            const large_buf = self.large_pool.acquire() orelse {
-                self.buffer_pool.markReplenish(bid);
-                conn.read_len = 0;
-                conn.keep_alive = false;
-                self.respond(conn, 413, "Content Too Large");
-                return;
-            };
-            slot.line3.large_buf_ptr = @intFromPtr(large_buf.ptr);
-            slot.line3.large_buf_len = @intCast(hw4.content_length);
-            slot.line3.large_buf_offset = 0;
-
-            @memcpy(large_buf[0..body_fragment.len], body_fragment);
-            slot.line3.large_buf_offset = @intCast(body_fragment.len);
-
-            conn.read_len = 0;
-            conn.state = .receiving_body;
-            self.submitBodyRead(conn, large_buf, slot) catch {
-                // 修改原因：body read SQE 提交失败后不会再进入 processBodyRequest，必须归还之前保留的 header read buffer。
-                self.buffer_pool.markReplenish(bid);
-                conn.read_bid = NO_READ_BUFFER_BID;
-                conn.read_len = 0;
-                self.large_pool.release(large_buf);
-                slot.line3.large_buf_ptr = 0;
-                self.closeConn(conn_id, conn.fd);
-            };
-            return;
-        }
-    }
+    if (startBodyRead(self, conn_id, conn, bid, effective_buf, effective_nread, reassembled_header, tls_decrypted)) return;
 
     var request_buf = effective_buf;
     if (self.connSlot(conn)) |slot| {
@@ -593,76 +445,268 @@ pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64
         }
     }
 
+    dispatchToHandler(self, conn_id, conn, path, request_buf, reassembled_header);
+}
+
+fn dispatchToHandler(self: *AsyncServer, conn_id: u64, conn: *Connection, path: []const u8, request_buf: []const u8, reassembled_header: bool) void {
     const has_async = self.middlewares.has_global or
         self.middlewares.precise.count() > 0 or
         self.middlewares.wildcard.items.len > 0 or
         self.handlers.count() > 0;
-    if (has_async) {
-        var selected_buf = request_buf;
-        var request_data_owned = false;
-        if (reassembled_header) {
-            selected_buf = self.allocator.dupe(u8, request_buf) catch {
-                self.buffer_pool.markReplenish(conn.read_bid);
-                conn.read_len = 0;
-                self.respond(conn, 500, "Internal Server Error");
-                return;
-            };
-            // 修改原因：跨 TCP 分片时 effective_buf 指向栈上 combo，fiber/队列不能持有栈指针。
-            request_data_owned = true;
-        }
-        const method_str = getMethodFromRequest(selected_buf) orelse "GET";
+    if (!has_async) {
+        self.buffer_pool.markReplenish(conn.read_bid);
+        conn.read_len = 0;
+        self.respond(conn, 404, "Not Found");
+        return;
+    }
 
-        const t = self.http_ctx_pool.create(self.allocator) catch {
-            if (request_data_owned) self.allocator.free(selected_buf);
+    var selected_buf = request_buf;
+    var request_data_owned = false;
+    if (reassembled_header) {
+        selected_buf = self.allocator.dupe(u8, request_buf) catch {
             self.buffer_pool.markReplenish(conn.read_bid);
             conn.read_len = 0;
             self.respond(conn, 500, "Internal Server Error");
             return;
         };
-        const method_cap: u4 = @intCast(@min(method_str.len, 15));
-        const path_cap: u8 = @intCast(@min(path.len, 255));
-        t.* = .{
-            .tag = HTTP_TASK_TAG,
-            .server = self,
-            .conn_id = conn_id,
-            .read_bid = conn.read_bid,
-            .method_len = method_cap,
-            .path_len = path_cap,
-            .request_data = @constCast(selected_buf),
-            .request_data_owned = request_data_owned,
-        };
-        @memcpy(t.method_buf[0..method_cap], method_str[0..method_cap]);
-        @memcpy(t.path_buf[0..path_cap], path[0..path_cap]);
+        // 修改原因：跨 TCP 分片时 effective_buf 指向栈上 combo，fiber/队列不能持有栈指针。
+        request_data_owned = true;
+    }
+    const method_str = getMethodFromRequest(selected_buf) orelse "GET";
 
-        if (self.shared_fiber_active) {
-            if (self.next) |*n| {
-                if (n.push(HttpTaskCtx, t.*, httpTaskExecWrapperWithOwnership, self.cfg.fiber_stack_size_kb * 1024)) {
-                    self.http_ctx_pool.destroy(t);
-                } else {
-                    http_fiber.httpTaskCleanup(t);
-                    self.respond(conn, 503, "Service Unavailable");
-                }
+    const t = self.http_ctx_pool.create(self.allocator) catch {
+        if (request_data_owned) self.allocator.free(selected_buf);
+        self.buffer_pool.markReplenish(conn.read_bid);
+        conn.read_len = 0;
+        self.respond(conn, 500, "Internal Server Error");
+        return;
+    };
+    const method_cap: u4 = @intCast(@min(method_str.len, 15));
+    const path_cap: u8 = @intCast(@min(path.len, 255));
+    t.* = .{
+        .tag = HTTP_TASK_TAG,
+        .server = self,
+        .conn_id = conn_id,
+        .read_bid = conn.read_bid,
+        .method_len = method_cap,
+        .path_len = path_cap,
+        .request_data = @constCast(selected_buf),
+        .request_data_owned = request_data_owned,
+    };
+    @memcpy(t.method_buf[0..method_cap], method_str[0..method_cap]);
+    @memcpy(t.path_buf[0..path_cap], path[0..path_cap]);
+
+    if (self.shared_fiber_active) {
+        if (self.next) |*n| {
+            if (n.push(HttpTaskCtx, t.*, httpTaskExecWrapperWithOwnership, self.cfg.fiber_stack_size_kb * 1024)) {
+                self.http_ctx_pool.destroy(t);
             } else {
                 http_fiber.httpTaskCleanup(t);
                 self.respond(conn, 503, "Service Unavailable");
             }
         } else {
-            var fiber = Fiber.init(self.shared_fiber_stack);
-            self.shared_fiber_active = true;
-            fiber.exec(.{
-                .userCtx = t,
-                .complete = httpTaskComplete,
-                .execFn = httpTaskExec,
-            });
+            http_fiber.httpTaskCleanup(t);
+            self.respond(conn, 503, "Service Unavailable");
         }
-
-        conn.read_len = 0;
-        return;
+    } else {
+        var fiber = Fiber.init(self.shared_fiber_stack);
+        self.shared_fiber_active = true;
+        fiber.exec(.{
+            .userCtx = t,
+            .complete = httpTaskComplete,
+            .execFn = httpTaskExec,
+        });
     }
 
-    self.buffer_pool.markReplenish(conn.read_bid);
     conn.read_len = 0;
-    self.respond(conn, 404, "Not Found");
+}
+
+fn startBodyRead(self: *AsyncServer, conn_id: u64, conn: *Connection, bid: u16, effective_buf: []const u8, effective_nread: usize, reassembled_header: bool, tls_decrypted: bool) bool {
+    const body_incomplete = brk: {
+        const slot = self.connSlot(conn) orelse break :brk false;
+        const hw3 = sticker.httpWork(slot);
+        if (hw3.content_length == 0) break :brk false;
+        const headers_end = if (hw3.headers_end > 0) hw3.headers_end else effective_nread;
+        const body_avail: usize = if (effective_nread > headers_end) effective_nread - headers_end else 0;
+        break :brk body_avail < hw3.content_length;
+    };
+    if (!body_incomplete) return false;
+
+    const slot = self.connSlot(conn).?;
+    const hw4 = sticker.httpWork(slot);
+    const headers_end = if (hw4.headers_end > 0) hw4.headers_end else effective_nread;
+    if (!fitsLargeBodyBuffer(hw4.content_length)) {
+        // 修改原因：LargeBufferPool 每块只有 1MB；继续用 min(content_length, large_buf.len)
+        // 会把超大请求体截断后交给业务层，并把剩余字节留在连接里污染后续请求。
+        self.buffer_pool.markReplenish(bid);
+        conn.read_len = 0;
+        conn.keep_alive = false;
+        self.respond(conn, 413, "Content Too Large");
+        return true;
+    }
+    if (reassembled_header or (build_options.tls_enabled and tls_decrypted)) {
+        // 修改原因：reassembled_header 时 effective_buf 指向 combo 栈上副本；TLS 解密时 effective_buf 指向 plaintext_buf 栈上副本。
+        // 进入异步 body 读取后栈已展开，必须把 header 保存到 heap，否则 processBodyRequest 会读到脏数据。
+        const header_copy = self.allocator.dupe(u8, effective_buf[0..headers_end]) catch {
+            self.buffer_pool.markReplenish(bid);
+            conn.read_len = 0;
+            conn.keep_alive = false;
+            self.respond(conn, 500, "Internal Server Error");
+            return true;
+        };
+        slot.line3.pending_buffer_ptr = @intFromPtr(header_copy.ptr);
+        hw4.header_len = @intCast(header_copy.len);
+    }
+    if (headers_end >= effective_nread) {
+        const large_buf = self.large_pool.acquire() orelse {
+            self.buffer_pool.markReplenish(bid);
+            conn.read_len = 0;
+            conn.keep_alive = false;
+            self.respond(conn, 413, "Content Too Large");
+            return true;
+        };
+        slot.line3.large_buf_ptr = @intFromPtr(large_buf.ptr);
+        slot.line3.large_buf_len = @intCast(hw4.content_length);
+        slot.line3.large_buf_offset = 0;
+
+        conn.read_len = 0;
+        conn.state = .receiving_body;
+        self.submitBodyRead(conn, large_buf, slot) catch {
+            // 修改原因：body read SQE 提交失败后不会再进入 processBodyRequest，必须归还之前保留的 header read buffer。
+            self.buffer_pool.markReplenish(bid);
+            conn.read_bid = NO_READ_BUFFER_BID;
+            conn.read_len = 0;
+            self.large_pool.release(large_buf);
+            slot.line3.large_buf_ptr = 0;
+            self.closeConn(conn_id, conn.fd);
+        };
+        return true;
+    }
+
+    const body_fragment = effective_buf[headers_end..effective_nread];
+    const large_buf = self.large_pool.acquire() orelse {
+        self.buffer_pool.markReplenish(bid);
+        conn.read_len = 0;
+        conn.keep_alive = false;
+        self.respond(conn, 413, "Content Too Large");
+        return true;
+    };
+    slot.line3.large_buf_ptr = @intFromPtr(large_buf.ptr);
+    slot.line3.large_buf_len = @intCast(hw4.content_length);
+    slot.line3.large_buf_offset = 0;
+
+    @memcpy(large_buf[0..body_fragment.len], body_fragment);
+    slot.line3.large_buf_offset = @intCast(body_fragment.len);
+
+    conn.read_len = 0;
+    conn.state = .receiving_body;
+    self.submitBodyRead(conn, large_buf, slot) catch {
+        // 修改原因：body read SQE 提交失败后不会再进入 processBodyRequest，必须归还之前保留的 header read buffer。
+        self.buffer_pool.markReplenish(bid);
+        conn.read_bid = NO_READ_BUFFER_BID;
+        conn.read_len = 0;
+        self.large_pool.release(large_buf);
+        slot.line3.large_buf_ptr = 0;
+        self.closeConn(conn_id, conn.fd);
+    };
+    return true;
+}
+
+const TlsReadResult = struct {
+    proceed: bool,
+    decrypted: bool,
+    plaintext_len: usize,
+    bid: u16,
+};
+
+fn tlsDecryptRead(self: *AsyncServer, conn_id: u64, conn: *Connection, bid: u16, ciphertext: []const u8, plaintext_buf: *[BUFFER_SIZE]u8) TlsReadResult {
+    if (!build_options.tls_enabled) {
+        return .{ .proceed = true, .decrypted = false, .plaintext_len = 0, .bid = bid };
+    }
+    const tls_stream = conn.tls orelse return .{ .proceed = true, .decrypted = false, .plaintext_len = 0, .bid = bid };
+
+    const decrypted = tls_stream.read(ciphertext, plaintext_buf) catch {
+        self.buffer_pool.markReplenish(bid);
+        conn.read_len = 0;
+        self.closeConn(conn_id, conn.fd);
+        return .{ .proceed = false, .decrypted = false, .plaintext_len = 0, .bid = bid };
+    };
+    if (decrypted == 0) {
+        self.buffer_pool.markReplenish(bid);
+        conn.read_bid = NO_READ_BUFFER_BID;
+        conn.read_len = 0;
+        self.submitRead(conn_id, conn) catch |err_sub| {
+            logErr("submitRead after TLS WANT_READ: {s}", .{@errorName(err_sub)});
+            self.closeConn(conn_id, conn.fd);
+        };
+        return .{ .proceed = false, .decrypted = false, .plaintext_len = 0, .bid = bid };
+    }
+    self.buffer_pool.markReplenish(bid);
+    return .{ .proceed = true, .decrypted = true, .plaintext_len = decrypted, .bid = NO_READ_BUFFER_BID };
+}
+
+const ReassembleResult = struct {
+    effective_buf: []const u8,
+    effective_nread: usize,
+    reassembled_header: bool,
+    pending_to_free: u16,
+};
+
+fn reassembleHeader(self: *AsyncServer, conn: *Connection, effective_buf: []const u8, effective_nread: usize, combo: *[MAX_REASSEMBLED_HEADER_SIZE]u8, tls_decrypted: bool) ReassembleResult {
+    var pending_to_free: u16 = NO_READ_BUFFER_BID;
+    var reassembled_header = false;
+    var result_buf = effective_buf;
+    var result_nread = effective_nread;
+
+    const slot = self.connSlot(conn) orelse return .{
+        .effective_buf = result_buf,
+        .effective_nread = result_nread,
+        .reassembled_header = false,
+        .pending_to_free = pending_to_free,
+    };
+
+    // TLS decrypt reuses plaintext buffer for effective_buf, but if header
+    // spans reads, the plaintext is on the stack and will be overwritten.
+    // Use heap save (slice to slot.line3.pending_buffer_ptr) for TLS path.
+    // For plaintext path, use io_uring bid as before.
+    if (!build_options.tls_enabled or !tls_decrypted or blk: {
+        const hw = sticker.httpWork(slot);
+        break :blk hw.pending_len > 0 and hw.pending_bid == NO_READ_BUFFER_BID and slot.line3.pending_buffer_ptr != 0;
+    }) {
+        const hw = sticker.httpWork(slot);
+        if (hw.pending_len > 0 and (hw.pending_bid != NO_READ_BUFFER_BID or slot.line3.pending_buffer_ptr != 0)) {
+            const prev_len: usize = @intCast(hw.pending_len);
+            var saved_heap: ?[]u8 = null;
+            const prev_buf: []const u8 = if (slot.line3.pending_buffer_ptr != 0) blk: {
+                const saved: []u8 = @as([*]u8, @ptrFromInt(slot.line3.pending_buffer_ptr))[0..prev_len];
+                // 修改原因：超过两段的 header 重组不能只依赖上一个 buffer id，累计片段必须从堆副本恢复。
+                saved_heap = saved;
+                slot.line3.pending_buffer_ptr = 0;
+                hw.header_len = 0;
+                break :blk saved;
+            } else blk: {
+                pending_to_free = hw.pending_bid;
+                break :blk self.buffer_pool.getReadBuf(hw.pending_bid)[0..prev_len];
+            };
+            const copy_prev_len = @min(prev_buf.len, combo.len);
+            const cur_len = @min(effective_nread, combo.len - copy_prev_len);
+            @memcpy(combo[0..copy_prev_len], prev_buf[0..copy_prev_len]);
+            @memcpy(combo[copy_prev_len..][0..cur_len], effective_buf[0..cur_len]);
+            result_buf = combo[0 .. copy_prev_len + cur_len];
+            result_nread = copy_prev_len + cur_len;
+            reassembled_header = true;
+            if (saved_heap) |saved| self.allocator.free(saved);
+            hw.pending_bid = NO_READ_BUFFER_BID;
+            hw.pending_len = 0;
+        }
+    }
+
+    return .{
+        .effective_buf = result_buf,
+        .effective_nread = result_nread,
+        .reassembled_header = reassembled_header,
+        .pending_to_free = pending_to_free,
+    };
 }
 
 const statusText = @import("http_response.zig").statusText;
