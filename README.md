@@ -40,18 +40,18 @@ SWS_BENCH_CONNS=500 SWS_BENCH_REQS_PER_CONN=1000 ./zig-out/bin/im-bench
 IO thread (io_uring Ring A + fiber):
   ├── accept/read/write CQE → fiber → handler → respond
   ├── drain user SubmitQueues
-  ├── drain Next.go() ringbuffer tasks
+  ├── drain scheduler.go() ringbuffer tasks
   ├── drain DeferredResponse / InvokeQueue → respond
   ├── drainTick (DNS tick + invoke.drain + tick_hooks)
   └── TTL incremental scan (StackPool live list)
 
 Worker pool (optional, offload CPU/GPU/blocking I/O):
-  └── Next.submit() → worker thread → compute → InvokeQueue → IO thread drains
+  └── scheduler.submit() → worker thread → compute → InvokeQueue → IO thread drains
 ```
 
 Handlers run as **fibers on the IO thread** by default.
-- `Next.go()` — fiber on IO thread, zero thread switch. Use for DB io_uring, async I/O.
-- `Next.submit()` — worker pool. Use **only for CPU-intensive computation** that would block.
+- `server.scheduler().go()` — fiber on IO thread, zero thread switch. Use for DB io_uring, async I/O.
+- `server.scheduler().submit()` — worker pool. Use **only for CPU-intensive computation** that would block.
 
 ## Concurrency Model (Must Read Before Code Review)
 
@@ -88,7 +88,7 @@ They communicate only through two unidirectional handoff queues.
   workers. With the default `initPool4NextSubmit(1)`, there is exactly one
   worker — no concurrency. The race only exists with `n > 1`.
 
-- **The `Next.go()` ringbuffer** (`SubmitQueue`) is IO-thread push, IO-thread
+- **The `scheduler.go()` ringbuffer** (`SubmitQueue`) is IO-thread push, IO-thread
   pop (`drainNextTasks`). Single-threaded despite the "SPSC" name.
 
 - **`shared_fiber_active`** is read and written only by the IO thread. No
@@ -171,7 +171,7 @@ zig build run
 const sws = @import("sws");
 
 pub fn main() !void {
-    var server = try sws.AsyncServer.init(alloc, io, "0.0.0.0:9090", null, 0);
+    var server = try sws.AsyncServer.init(alloc, io, .{ .listen_addr = "0.0.0.0:9090" });
     defer server.deinit();
 
     server.GET("/hello", myHandler);
@@ -193,7 +193,7 @@ src/
 ├── buffer_pool.zig     (182)  tiered write buffer pool (8 size classes)
 ├── stack_pool.zig      (299)  O(1) pre-allocated connection slot pool
 ├── stack_pool_sticker.zig (362) CQE dispatch sticker for StackPool
-├── spsc_ringbuffer.zig (193)  SPSC queue for Next.go() tasks
+├── spsc_ringbuffer.zig (193)  SPSC queue for scheduler.go() tasks
 
 src/http/               (5787 lines)
 ├── async_server.zig    (819)  facade — init/deinit + public API forwarding
@@ -281,7 +281,7 @@ IO thread (single):
     → CQE dispatch (via StackPool sticker)
     → fiber → handler → ctx.text/json/html
     → drainPendingResumes (fiber resume queue)
-    → drainNextTasks (Next.go ringbuffer tasks)
+    → drainNextTasks (scheduler.go() ringbuffer tasks)
     → drainTick (DNS tick + invoke.drain + tick_hooks)
     → TTL scan (StackPool live list, incremental)
     → TTL scan (StackPool live list, incremental)
@@ -343,11 +343,14 @@ Ring B (HTTP client, dedicated thread):
 ### Init
 
 ```zig
-var server = try AsyncServer.init(alloc, io, "0.0.0.0:9090", app_ctx, fiber_stack_size_kb);
-//                                                                    ↑ 0 = 256KB
+var server = try AsyncServer.init(alloc, io, .{
+    .listen_addr = "0.0.0.0:9090",
+    .app_ctx = app_ctx,
+    .fiber_stack_size_kb = 0, // 0 = 256KB default
+});
 ```
 
-First handler/middleware registration calls `ensureNext()` → creates `Next` (ringbuffer) + `setDefault()`.
+First handler/middleware registration calls `ensureNext()` → lazily creates the `Next` scheduler (ringbuffer). There is no global/default instance — obtain it with `server.scheduler()`.
 
 Internally, `AsyncServer.init()` creates:
 - `pool`: StackPool — O(1) contiguous connection array
@@ -396,7 +399,12 @@ fn myHandler(allocator: Allocator, ctx: *Context) anyerror!void {
     const resp = try allocator.create(DeferredResponse);
     resp.* = .{ .server = s, .conn_id = ctx.conn_id, .allocator = allocator };
     ctx.deferred = true;
-    Next.go(Ctx, .{ .allocator = allocator, .resp = resp }, exec);
+    const scheduler = try s.scheduler();
+    if (!scheduler.go(Ctx, .{ .allocator = allocator, .resp = resp }, exec)) {
+        ctx.deferred = false;
+        allocator.destroy(resp);
+        return error.QueueFull;
+    }
 }
 ```
 
@@ -420,7 +428,7 @@ fn myHandler(allocator: Allocator, ctx: *Context) anyerror!void {
     const resp = try allocator.create(DeferredResponse);
     resp.* = .{ .server = s, .conn_id = ctx.conn_id, .allocator = allocator };
     ctx.deferred = true;
-    Next.submit(Ctx, .{ .allocator = allocator, .resp = resp }, exec);
+    (try s.scheduler()).submit(Ctx, .{ .allocator = allocator, .resp = resp }, exec);
 }
 ```
 
@@ -508,7 +516,8 @@ fn startBattle(server: *AsyncServer, room: *Room) void {
     const ctx = server.allocator.create(BattleCtx) catch return;
     ctx.blue_team = snapshotTeam(&room.teams[0], server.allocator) catch return;
     ctx.red_team  = snapshotTeam(&room.teams[1], server.allocator) catch return;
-    Next.submit(BattleCtx, ctx, doBattle);
+    const scheduler = server.scheduler() catch return;
+    scheduler.submit(BattleCtx, ctx, doBattle);
 }
 
 fn doBattle(ctx: *BattleCtx, complete: *const fn (?*anyopaque, []const u8) void) void {
@@ -526,15 +535,16 @@ try server.addHookDeferred(roomCommand); // deferred: fires per-player command
 ### Next.go / Next.submit
 
 ```zig
-Next.go(Ctx, ctx, exec);       // fiber on IO thread (io_uring I/O)
-Next.submit(Ctx, ctx, exec);   // worker pool (offload work)
+const scheduler = try server.scheduler(); // lazily creates the fiber scheduler
+scheduler.go(Ctx, ctx, exec);       // fiber on IO thread (io_uring I/O)
+scheduler.submit(Ctx, ctx, exec);   // worker pool (offload work)
 ```
 
-Both are static. `Next.go` works out of the box (auto `setDefault` on first route). `Next.submit` requires `server.initPool4NextSubmit(n)`.
+`go` / `submit` / `trySubmit` are instance methods on the `*Next` returned by `server.scheduler()`. The scheduler is created lazily on the first route/middleware registration — there is no global/default `Next`. `submit` requires `server.initPool4NextSubmit(n)` to configure the worker pool.
 
 #### GPU / Heavy Compute
 
-GPU compute uses `Next.submit` — worker thread calls CUDA / CANN / Vulkan runtime.
+GPU compute uses `scheduler.submit` — worker thread calls CUDA / CANN / Vulkan runtime.
 io_uring direct dispatch for GPU is blocked on Linux kernel drivers (missing
 `IORING_OP_URING_CMD` for compute queues, NVIDIA / Huawei not yet shipped).
 
@@ -548,8 +558,9 @@ after submitting a kernel, freeing the worker thread to process other tasks whil
 the GPU runs. The worker tick polls parked fibers and resumes when the kernel completes.
 
 ```zig
+// scheduler = server.scheduler() — see "Next.go / Next.submit" above
 // CPU task — no yield, runs to completion
-Next.submit(CpuCtx, ctx, struct {
+scheduler.submit(CpuCtx, ctx, struct {
     fn exec(c: *CpuCtx, complete: ...) void {
         const result = heavyCompute(c.input);
         complete(c, result);
@@ -558,7 +569,7 @@ Next.submit(CpuCtx, ctx, struct {
 
 // GPU task — MUST call workerYield after submitting kernel
 //                                 ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
-Next.submit(GpuCtx, ctx, struct {
+scheduler.submit(GpuCtx, ctx, struct {
     fn exec(c: *GpuCtx, complete: ...) void {
         cudaLaunchKernel(kernel, stream, args);
         Fiber.workerYield(            // ← THIS LINE makes it a GPU task
@@ -577,9 +588,9 @@ Next.submit(GpuCtx, ctx, struct {
 Without it, the worker thread blocks synchronously until the kernel completes,
 defeating fiber multiplexing.
 
-> ⚠️ **GPU tasks MUST use `Next.submit`, never `Next.go`.**
+> ⚠️ **GPU tasks MUST use `scheduler.submit`, never `scheduler.go`.**
 >
-> `Next.go` runs on the IO thread. Two failure modes:
+> `scheduler.go` runs on the IO thread. Two failure modes:
 > - **Without `workerYield`:** `cuStreamSynchronize` blocks the IO thread —
 >   io_uring CQE processing stops, entire server freezes.
 > - **With `workerYield`:** fiber yields correctly, IO thread stays alive — but
@@ -713,7 +724,7 @@ self.large_pool.release(buf);
 ### IO_QUANTUM — Next task fairness
 
 `drainNextTasks` is capped at 64 tasks per event loop iteration (`IO_QUANTUM`). This prevents
-depth-first starvation: when a handler's `Next.go()` spawns new tasks, they don't preempt
+depth-first starvation: when a handler's `scheduler.go()` spawns new tasks, they don't preempt
 the remaining ReadyQueue entries or CQE harvesting. P99 tail latency stays uniform under load.
 
 ### HttpRing + HttpClient (Ring B)
@@ -803,14 +814,14 @@ Built-in fiber (x86_64 and ARM64 Linux). All handler fibers share a **single pre
 > This directly translates to lower memory pressure and better operational stability.
 >
 > This is the fundamental tradeoff: **Future API semantics vs. 1M-connection memory model**.
-> SWS chooses the latter. All async is done via `Next.go`/`Next.submit` with callbacks
+> SWS chooses the latter. All async is done via `scheduler.go`/`scheduler.submit` with callbacks
 > instead of `await`-style suspension.
 > - Fibers are cooperative; OS threads are preemptive. This breaks the fiber model.
 >
 > | Zig pattern | SWS replacement |
 > |---|---|
-> | `io.async(cpuWork)` + `future.await(io)` | `Next.submit(Ctx, ctx, exec)` + `DeferredResponse` |
-> | `io.async(ioWork)` + `future.await(io)` | `Next.go(Ctx, ctx, exec)` (fiber on IO thread) |
+> | `io.async(cpuWork)` + `future.await(io)` | `scheduler.submit(Ctx, ctx, exec)` + `DeferredResponse` |
+> | `io.async(ioWork)` + `future.await(io)` | `scheduler.go(Ctx, ctx, exec)` (fiber on IO thread) |
 >
 > **Pattern**:
 > ```zig
@@ -823,11 +834,11 @@ Built-in fiber (x86_64 and ARM64 Linux). All handler fibers share a **single pre
 >     ctx.deferred = true;
 >     const resp = try allocator.create(DeferredResponse);
 >     resp.* = .{ .server = server, .conn_id = ctx.conn_id, .allocator = allocator };
->     Next.submit(Ctx, .{ .resp = resp, .data = data }, exec);
+>     (try server.scheduler()).submit(Ctx, .{ .resp = resp, .data = data }, exec);
 > }
 > ```
 >
-> See `Next.submit` section above for the full exec/complete callback API.
+> See the `Next.go / Next.submit` section above for the full exec/complete callback API.
 
 ### Routing / Middleware / WebSocket / Context
 
@@ -916,10 +927,11 @@ zig build -Denable-tls=true
 ### Server TLS
 
 ```zig
-var server = try sws.AsyncServer.init(alloc, io, "0.0.0.0:9443", null, 64,
-    .{ .cert_path = "/etc/ssl/fullchain.pem", .key_path = "/etc/ssl/privkey.pem" }
-);
-// Pass null to disable TLS
+var server = try sws.AsyncServer.init(alloc, io, .{
+    .listen_addr = "0.0.0.0:9443",
+    .tls_auth = .{ .cert_path = "/etc/ssl/fullchain.pem", .key_path = "/etc/ssl/privkey.pem" },
+});
+// Omit .tls_auth (or set null) to disable TLS
 ```
 
 ### Client TLS
@@ -934,15 +946,41 @@ const resp = try client.get("https://api.example.com/data");
 
 ## Config
 
+All server configuration is a single typed `sws.Config` struct (or `sws.AsyncServer.Config`). Pass it to `AsyncServer.init`; tune fields directly after init via `server.cfg.<field>`.
+
+```zig
+var server = try sws.AsyncServer.init(alloc, io, .{
+    .listen_addr = "0.0.0.0:9090",
+    .fiber_stack_size_kb = 64,   // 0 = 256KB default
+    .idle_timeout_ms = 30000,
+});
+
+// Post-init tuning: direct field access (no config(key, value) setter).
+server.cfg.idle_timeout_ms = 60000;
+```
+
 | key | default | description |
 |-----|---------|-------------|
+| `listen_addr` | — | `ip:port` listen address (required) |
+| `app_ctx` | null | user context pointer, exposed as `server.app_ctx` |
+| `tls_auth` | null | TLS cert/key paths (requires `-Denable-tls`) |
 | `fiber_stack_size_kb` | 256 | fiber stack size (KB). 0 = 256 |
+| `max_connections` | 1048576 | StackPool slot count |
+| `large_pool_capacity` | 64 | LargeBufferPool block count (1MB each) |
 | `io_cpu` | null | pin IO thread to CPU core |
+| `log_cpu` | null | pin async-logger thread to CPU core |
 | `idle_timeout_ms` | 30000 | close idle connections |
 | `write_timeout_ms` | 5000 | close stuck-write connections |
 | `buffer_size` | 4096 | io_uring buffer block size |
 | `buffer_pool_size` | 16384 | number of buffer blocks |
 | `max_fixed_files` | 65535 | registered fixed-file slots (beyond this uses plain-fd I/O) |
+| `max_header_buffer_size` | 8192 | request header buffer cap |
+| `max_response_buffer_size` | 4096 | response buffer cap |
+| `max_cqes_batch` | 128 | CQEs drained per iteration |
+| `ring_entries` | 4096 | io_uring ring size |
+| `task_queue_size` | 1024 | Next.go ringbuffer capacity |
+| `response_queue_size` | 1024 | deferred response queue capacity |
+| `max_path_length` | 2048 | request target length cap |
 
 ## invokeOnIoThread
 

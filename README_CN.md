@@ -30,18 +30,18 @@ SWS_BENCH_CONNS=500 SWS_BENCH_REQS_PER_CONN=1000 ./zig-out/bin/im-bench
 ```
 IO 线程（io_uring Ring A + fiber）:
   ├── accept/read/write CQE → fiber → handler → 发响应
-  ├── drainNextTasks（Next.go ringbuffer 任务）
+  ├── drainNextTasks（scheduler.go() ringbuffer 任务）
   ├── drainDeferred / InvokeQueue → 发响应
   ├── drainTick（DNS tick + invoke.drain + tick_hooks）
   └── TTL 增量扫描（StackPool 活跃表）
 
 Worker 线程池（可选，仅 CPU 密集任务）:
-  └── Next.submit() → worker 线程 → 计算 → InvokeQueue → IO 线程回调
+  └── scheduler.submit() → worker 线程 → 计算 → InvokeQueue → IO 线程回调
 ```
 
 Handler 默认作为 **fiber 运行在 IO 线程上**。
-- `Next.go()` — IO 线程 fiber，零线程切换。用于 DB io_uring、异步 I/O。
-- `Next.submit()` — 线程池。将 CPU 重活、GPU 推理、同步阻塞 I/O 卸离 IO 线程。
+- `server.scheduler().go()` — IO 线程 fiber，零线程切换。用于 DB io_uring、异步 I/O。
+- `server.scheduler().submit()` — 线程池。将 CPU 重活、GPU 推理、同步阻塞 I/O 卸离 IO 线程。
 
 ## 环境要求
 
@@ -100,7 +100,7 @@ zig build run
 const sws = @import("sws");
 
 pub fn main() !void {
-    var server = try sws.AsyncServer.init(alloc, io, "0.0.0.0:9090", null, 0);
+    var server = try sws.AsyncServer.init(alloc, io, .{ .listen_addr = "0.0.0.0:9090" });
     defer server.deinit();
 
     server.GET("/hello", myHandler);
@@ -120,7 +120,7 @@ IO 线程（单线程）:
     → CQE 分发（通过 StackPool sticker）
     → fiber → handler → ctx.text/json/html
     → drainPendingResumes（fiber 恢复队列）
-    → drainNextTasks（Next.go ringbuffer 任务）
+    → drainNextTasks（scheduler.go() ringbuffer 任务）
     → drainTick（DNS tick + invoke.drain + tick_hooks）
     → TTL 扫描（StackPool 活跃表，增量滑窗）
     → 循环
@@ -180,11 +180,14 @@ Ring B（HTTP 客户端，独立线程）:
 ### 初始化
 
 ```zig
-var server = try AsyncServer.init(alloc, io, "0.0.0.0:9090", app_ctx, fiber_stack_size_kb);
-//                                                                    ↑ 0 = 256KB
+var server = try AsyncServer.init(alloc, io, .{
+    .listen_addr = "0.0.0.0:9090",
+    .app_ctx = app_ctx,
+    .fiber_stack_size_kb = 0, // 0 = 256KB 默认
+});
 ```
 
-首次注册 handler/middleware 时 `ensureNext()` 自动创建 `Next`（ringbuffer）+ `setDefault()`。
+首次注册 handler/middleware 时 `ensureNext()` 会惰性创建 `Next` 调度器（ringbuffer）。没有全局/默认实例——用 `server.scheduler()` 获取。
 
 内部 `AsyncServer.init()` 创建：
 - `pool`: StackPool — O(1) 连续数组连接池
@@ -233,7 +236,12 @@ fn myHandler(allocator: Allocator, ctx: *Context) anyerror!void {
     const resp = try allocator.create(DeferredResponse);
     resp.* = .{ .server = s, .conn_id = ctx.conn_id, .allocator = allocator };
     ctx.deferred = true;
-    Next.go(Ctx, .{ .allocator = allocator, .resp = resp }, exec);
+    const scheduler = try s.scheduler();
+    if (!scheduler.go(Ctx, .{ .allocator = allocator, .resp = resp }, exec)) {
+        ctx.deferred = false;
+        allocator.destroy(resp);
+        return error.QueueFull;
+    }
 }
 ```
 
@@ -257,7 +265,7 @@ fn myHandler(allocator: Allocator, ctx: *Context) anyerror!void {
     const resp = try allocator.create(DeferredResponse);
     resp.* = .{ .server = s, .conn_id = ctx.conn_id, .allocator = allocator };
     ctx.deferred = true;
-    Next.submit(Ctx, .{ .allocator = allocator, .resp = resp }, exec);
+    (try s.scheduler()).submit(Ctx, .{ .allocator = allocator, .resp = resp }, exec);
 }
 ```
 
@@ -346,7 +354,8 @@ fn startBattle(server: *AsyncServer, room: *Room) void {
     const ctx = server.allocator.create(BattleCtx) catch return;
     ctx.blue_team = snapshotTeam(&room.teams[0], server.allocator) catch return;
     ctx.red_team  = snapshotTeam(&room.teams[1], server.allocator) catch return;
-    Next.submit(BattleCtx, ctx, doBattle);
+    const scheduler = server.scheduler() catch return;
+    scheduler.submit(BattleCtx, ctx, doBattle);
 }
 
 fn doBattle(ctx: *BattleCtx, complete: *const fn (?*anyopaque, []const u8) void) void {
@@ -364,15 +373,16 @@ try server.addHookDeferred(roomCommand); // deferred: 每条玩家指令触发�
 ### Next.go / Next.submit
 
 ```zig
-Next.go(Ctx, ctx, exec);       // IO 线程 fiber（io_uring I/O）
-Next.submit(Ctx, ctx, exec);   // 线程池（卸货）
+const scheduler = try server.scheduler(); // 惰性创建 fiber 调度器
+scheduler.go(Ctx, ctx, exec);       // IO 线程 fiber（io_uring I/O）
+scheduler.submit(Ctx, ctx, exec);   // 线程池（卸货）
 ```
 
-都是静态方法。`Next.go` 开箱即用（首次路由自动 `setDefault`）。`Next.submit` 需要 `server.initPool4NextSubmit(n)`。
+`go` / `submit` / `trySubmit` 都是 `server.scheduler()` 返回的 `*Next` 上的实例方法。调度器在首次注册路由/中间件时惰性创建——没有全局/默认 `Next`。`submit` 需要先 `server.initPool4NextSubmit(n)` 配置线程池。
 
 #### GPU / 重型计算
 
-GPU 计算用 `Next.submit` — worker 线程调 CUDA / CANN / Vulkan runtime。
+GPU 计算用 `scheduler.submit` — worker 线程调 CUDA / CANN / Vulkan runtime。
 io_uring 直连 GPU 受限于 Linux 内核驱动（compute queue 尚未接 `IORING_OP_URING_CMD`，
 NVIDIA / 华为还未发布）。
 
@@ -386,8 +396,9 @@ Worker 池始终支持 fiber。GPU 任务提交 kernel 后调 `Fiber.workerYield
 kernel 完成后自动 resume。
 
 ```zig
+// scheduler = server.scheduler()，见上方 “Next.go / Next.submit”
 // CPU 任务 — 不 yield，跑到结束
-Next.submit(CpuCtx, ctx, struct {
+scheduler.submit(CpuCtx, ctx, struct {
     fn exec(c: *CpuCtx, complete: ...) void {
         const result = heavyCompute(c.input);
         complete(c, result);
@@ -396,7 +407,7 @@ Next.submit(CpuCtx, ctx, struct {
 
 // GPU 任务 — 提交 kernel 后必须调 workerYield
 //                              ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
-Next.submit(GpuCtx, ctx, struct {
+scheduler.submit(GpuCtx, ctx, struct {
     fn exec(c: *GpuCtx, complete: ...) void {
         cudaLaunchKernel(kernel, stream, args);
         Fiber.workerYield(            // ← 这一行决定它是 GPU 任务
@@ -414,9 +425,9 @@ Next.submit(GpuCtx, ctx, struct {
 **CPU 与 GPU 的唯一区别：** GPU 任务调 `Fiber.workerYield`。
 不调这行 = worker 线程同步阻塞等 kernel 结束 = fiber 复用失效。
 
-> ⚠️ **GPU 任务只能用 `Next.submit`，禁止用 `Next.go`。**
+> ⚠️ **GPU 任务只能用 `scheduler.submit`，禁止用 `scheduler.go`。**
 >
-> `Next.go` 跑在 IO 线程。两种死法：
+> `scheduler.go` 跑在 IO 线程。两种死法：
 > - **不调 `workerYield`：** `cuStreamSynchronize` 同步阻塞 IO 线程 —
 >   io_uring CQE 停摆，整个服务器冻结。
 > - **调了 `workerYield`：** fiber 正常挂起，IO 线程继续跑 — 但 fiber 永远不醒。
@@ -466,7 +477,7 @@ self.large_pool.release(buf);
 ### IO_QUANTUM — Next 任务公平调度
 
 `drainNextTasks` 每轮 IO 循环最多消费 64 个任务（`IO_QUANTUM`），防止深度优先偏向：
-handler 中调 `Next.go()` 产生的新任务不会挤占 ReadyQueue 后续就绪任务和 CQE 收割。
+handler 中调 `scheduler.go()` 产生的新任务不会挤占 ReadyQueue 后续就绪任务和 CQE 收割。
 P99 尾延迟在高负载下保持均匀。
 
 ### Fiber
@@ -510,13 +521,13 @@ sws 内置极简 fiber（x86_64 + ARM64 Linux）。所有 handler fiber **共享
 > 更小的内存占用直接提升系统稳定性和运维可靠性。
 >
 > 这就是根本取舍：**Future API 的语义 vs. 百万连接的内存模型**。
-> SWS 选择了后者。所有异步通过 `Next.go`/`Next.submit` + 回调完成，而非 `await` 式暂停恢复。
+> SWS 选择了后者。所有异步通过 `scheduler.go`/`scheduler.submit` + 回调完成，而非 `await` 式暂停恢复。
 > - fiber 是协作式切换，OS 线程是抢占式调度。两者互不兼容。
 >
 > | Zig 模式 | sws 替代 |
 > |---|---|
-> | `io.async(cpuWork)` + `future.await(io)` | `Next.submit(Ctx, ctx, exec)` + `DeferredResponse` |
-> | `io.async(ioWork)` + `future.await(io)` | `Next.go(Ctx, ctx, exec)`（IO 线程 fiber）|
+> | `io.async(cpuWork)` + `future.await(io)` | `scheduler.submit(Ctx, ctx, exec)` + `DeferredResponse` |
+> | `io.async(ioWork)` + `future.await(io)` | `scheduler.go(Ctx, ctx, exec)`（IO 线程 fiber）|
 >
 > **用法**：
 > ```zig
@@ -529,11 +540,11 @@ sws 内置极简 fiber（x86_64 + ARM64 Linux）。所有 handler fiber **共享
 >     ctx.deferred = true;
 >     const resp = try allocator.create(DeferredResponse);
 >     resp.* = .{ .server = server, .conn_id = ctx.conn_id, .allocator = allocator };
->     Next.submit(Ctx, .{ .resp = resp, .data = data }, exec);
+>     (try server.scheduler()).submit(Ctx, .{ .resp = resp, .data = data }, exec);
 > }
 > ```
 >
-> 完整 API 见上方 `Next.submit` 章节。
+> 完整 API 见上方 `Next.go / Next.submit` 章节。
 
 ### 路由 / 中间件 / WebSocket / Context
 
@@ -584,15 +595,41 @@ WS handler 可将帧数据异步卸出，因此帧负载在 handler 返回后仍
 
 ## 配置
 
+所有服务器配置都集中在一个类型化的 `sws.Config` 结构体（即 `sws.AsyncServer.Config`）。传给 `AsyncServer.init`，初始化后可直接通过 `server.cfg.<字段>` 调整。
+
+```zig
+var server = try sws.AsyncServer.init(alloc, io, .{
+    .listen_addr = "0.0.0.0:9090",
+    .fiber_stack_size_kb = 64,   // 0 = 256KB 默认
+    .idle_timeout_ms = 30000,
+});
+
+// 初始化后微调：直接字段访问（不再有 config(key, value) setter）。
+server.cfg.idle_timeout_ms = 60000;
+```
+
 | key | 默认值 | 说明 |
 |-----|--------|------|
+| `listen_addr` | — | `ip:port` 监听地址（必填） |
+| `app_ctx` | null | 用户上下文指针，通过 `server.app_ctx` 暴露 |
+| `tls_auth` | null | TLS 证书/私钥路径（需 `-Denable-tls`） |
 | `fiber_stack_size_kb` | 256 | fiber 栈大小（KB），0 自动变 256 |
+| `max_connections` | 1048576 | StackPool 槽位数 |
+| `large_pool_capacity` | 64 | LargeBufferPool 块数（每块 1MB） |
 | `io_cpu` | null | IO 线程绑核 |
+| `log_cpu` | null | 异步日志线程绑核 |
 | `idle_timeout_ms` | 30000 | 关闭空闲连接 |
 | `write_timeout_ms` | 5000 | 写超时关闭连接 |
 | `buffer_size` | 4096 | io_uring 缓冲区块大小 |
 | `buffer_pool_size` | 16384 | 缓冲区块数量 |
 | `max_fixed_files` | 65535 | 注册固定文件槽位数（超出后回退到普通 fd I/O） |
+| `max_header_buffer_size` | 8192 | 请求头缓冲上限 |
+| `max_response_buffer_size` | 4096 | 响应缓冲上限 |
+| `max_cqes_batch` | 128 | 每轮 IO 循环处理的 CQE 数 |
+| `ring_entries` | 4096 | io_uring ring 大小 |
+| `task_queue_size` | 1024 | Next.go ringbuffer 容量 |
+| `response_queue_size` | 1024 | 延迟响应队列容量 |
+| `max_path_length` | 2048 | 请求 target 长度上限 |
 
 ## invokeOnIoThread
 
