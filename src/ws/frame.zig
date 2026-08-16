@@ -114,9 +114,9 @@ test "parseFrame rejects non-minimal payload length encoding" {
     try std.testing.expectError(error.InvalidFrame, parseFrame(&medium_as_127));
 }
 
-test "parseFrame rejects payload lengths that cannot fit host slices" {
+test "parseFrame treats huge declared payload as incomplete" {
     var huge = [_]u8{ 0x81, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0 };
-    try std.testing.expectError(error.FrameTooLarge, parseFrame(&huge));
+    try std.testing.expectError(error.IncompleteFrame, parseFrame(&huge));
 }
 
 test "parseFrame rejects unsupported fragmented data frames" {

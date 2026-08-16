@@ -53,8 +53,7 @@ pub const Context = struct {
     /// Slice is borrowed from a stack-local buffer, never heap-allocated.
     params: []const RouteParam = &.{},
 
-    /// Returns a chainable ResponseBuilder for building the response.
-    /// Usage: try ctx.response().status(201).json(data);
+    /// Returns a ResponseBuilder for building the response (see ResponseBuilder).
     pub fn response(self: *Context) ResponseBuilder {
         return ResponseBuilder.init(self);
     }
@@ -216,11 +215,13 @@ pub const Context = struct {
         if (self.headers) |*h| h.deinit(self.allocator);
     }
 
-    /// Chainable API for building HTTP responses.
+    /// Builder for HTTP responses.
     ///
     /// Usage:
-    ///   try ctx.response().status(201).json(data);
-    ///   try ctx.response().header("X-Custom", "val").text("ok");
+    ///   var r = ctx.response();
+    ///   r.status(201);
+    ///   try r.json(data);
+    ///   try r.header("X-Custom", "val");
     pub const ResponseBuilder = struct {
         ctx: *Context,
 
@@ -228,14 +229,12 @@ pub const Context = struct {
             return .{ .ctx = ctx };
         }
 
-        pub fn status(self: *ResponseBuilder, code: u16) *ResponseBuilder {
+        pub fn status(self: *ResponseBuilder, code: u16) void {
             self.ctx.status = code;
-            return self;
         }
 
-        pub fn header(self: *ResponseBuilder, key: []const u8, value: []const u8) !*ResponseBuilder {
+        pub fn header(self: *ResponseBuilder, key: []const u8, value: []const u8) !void {
             try self.ctx.setHeader(key, value);
-            return self;
         }
 
         pub fn json(self: *ResponseBuilder, value: anytype) !void {
@@ -342,7 +341,9 @@ test "ResponseBuilder chains status and json" {
     };
     defer ctx.deinit();
 
-    try ctx.response().status(201).json(.{ .id = 42 });
+    var r = ctx.response();
+    r.status(201);
+    try r.json(.{ .id = 42 });
     try std.testing.expectEqual(@as(u16, 201), ctx.status);
     try std.testing.expectEqual(Context.ContentType.json, ctx.content_type);
     try std.testing.expect(ctx.body != null);
@@ -374,5 +375,6 @@ test "ResponseBuilder header returns error for invalid header" {
     };
     defer ctx.deinit();
 
-    try std.testing.expectError(error.InvalidHeader, ctx.response().header("Bad:Name", "x"));
+    var r = ctx.response();
+    try std.testing.expectError(error.InvalidHeader, r.header("Bad:Name", "x"));
 }
