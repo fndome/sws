@@ -692,7 +692,7 @@ test "HttpClient cancelled notify returns request slot once" {
         .allocator = std.testing.allocator,
         .ring_b = undefined,
         .cache = undefined,
-        .pool_lock = .{},
+        .pool_lock = .init,
         .req_pool_free = initReqFreelist(),
         .req_pool_top = REQUEST_POOL_SIZE,
         .req_pool_items = undefined,

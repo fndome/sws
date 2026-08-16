@@ -93,7 +93,7 @@ pub const TinyCache = struct {
             return error.OutOfMemory;
         };
         errdefer self.allocator.free(host_dup);
-        try self.entries.append(.{
+        try self.entries.append(self.allocator, .{
             .host = host_dup,
             .port = port,
             .tls = tls,
@@ -202,7 +202,7 @@ test "TinyCache.store keeps stream ownership with caller on PoolFull" {
     const fake_stream: *RingSharedClient = @ptrFromInt(0x1000);
     for (0..MAX_CONNS_PER_HOST) |_| {
         const host = try std.testing.allocator.dupe(u8, "same.test");
-        try cache.entries.append(.{
+        try cache.entries.append(std.testing.allocator, .{
             .host = host,
             .port = 80,
             .tls = false,
@@ -228,7 +228,7 @@ test "TinyCache.store applies pool limit per host and port" {
     const fake_stream: *RingSharedClient = @ptrFromInt(0x1000);
     for (0..MAX_CONNS_PER_HOST) |i| {
         const host = try std.fmt.allocPrint(std.testing.allocator, "h{d}.test", .{i});
-        try cache.entries.append(.{
+        try cache.entries.append(std.testing.allocator, .{
             .host = host,
             .port = 80,
             .tls = false,
@@ -254,7 +254,7 @@ test "TinyCache.acquire matches host case-insensitively" {
 
     const fake_stream: *RingSharedClient = @ptrFromInt(0x1000);
     const host = try std.testing.allocator.dupe(u8, "Example.COM");
-    try cache.entries.append(.{
+    try cache.entries.append(std.testing.allocator, .{
         .host = host,
         .port = 80,
         .tls = false,

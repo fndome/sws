@@ -767,7 +767,7 @@ test "pending header copy preserves reassembled fragments" {
 }
 
 test "submitRead preparation resets recycled marker for next CQE" {
-    var conn = Connection{ .read_buf_recycled = true };
+    var conn = Connection{ .id = 0, .fd = 0, .read_buf_recycled = true };
     prepareReadSubmission(&conn);
     try std.testing.expect(!conn.read_buf_recycled);
 }

@@ -130,4 +130,23 @@ test {
     _ = @import("ws/upgrade.zig");
     _ = @import("ws/server.zig");
     _ = @import("udp/buffer.zig");
+
+    // Linux-only modules (io_uring); run via `zig build test` on Linux/CI.
+    _ = @import("buffer_pool.zig");
+    _ = @import("stack_pool_sticker.zig");
+    _ = @import("client/http_client.zig");
+    _ = @import("client/tiny_cache.zig");
+    _ = @import("dns/resolver.zig");
+    _ = @import("next/pipe.zig");
+    _ = @import("shared/tcp_stream.zig");
+    _ = @import("shared/io_registry.zig");
+    _ = @import("http/async_server.zig");
+    _ = @import("http/http_body.zig");
+    _ = @import("http/http_fiber.zig");
+    _ = @import("http/http_response.zig");
+    _ = @import("http/http_routing.zig");
+    _ = @import("http/tcp_read.zig");
+    _ = @import("http/ws_handler.zig");
+    _ = @import("udp/server.zig");
+    _ = @import("tcp/server.zig");
 }

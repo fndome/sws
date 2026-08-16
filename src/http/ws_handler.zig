@@ -568,7 +568,7 @@ pub fn drainWsWriteQueue(self: *AsyncServer, conn: *Connection) void {
 }
 
 test "WebSocket frame input accumulates split TCP reads" {
-    var conn = Connection{};
+    var conn = Connection{ .id = 0, .fd = 0 };
     var owned: ?[]u8 = null;
     defer if (owned) |buf| std.testing.allocator.free(buf);
     defer if (conn.accum_buf) |buf| std.testing.allocator.free(buf);
@@ -589,7 +589,7 @@ test "WebSocket frame input accumulates split TCP reads" {
 }
 
 test "WebSocket frame input rejects accumulated overflow" {
-    var conn = Connection{};
+    var conn = Connection{ .id = 0, .fd = 0 };
     conn.accum_buf = try std.testing.allocator.alloc(u8, MAX_WS_ACCUMULATED_FRAME_SIZE);
     defer if (conn.accum_buf) |buf| std.testing.allocator.free(buf);
 
@@ -602,7 +602,7 @@ test "WebSocket frame input rejects accumulated overflow" {
 }
 
 test "sendWsFrame queues while protocol write is in flight" {
-    var conn = Connection{};
+    var conn = Connection{ .id = 0, .fd = 0 };
     try std.testing.expect(!shouldQueueWsSend(&conn));
 
     conn.state = .ws_writing;

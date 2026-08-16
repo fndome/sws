@@ -310,7 +310,7 @@ pub fn responseHasTrailingBytes(total_read: usize, complete_len: usize) bool {
 pub fn makeErrorResponse(allocator: Allocator, status: u16, msg: []const u8) Response {
     // Triple-fallback: dupe -> alloc(0) -> zero-length compile-time literal.
     // The final literal is safe because Response.deinit guards on body.len > 0.
-    const body = allocator.dupe(u8, msg) catch allocator.alloc(u8, 0) catch &.{};
+    const body = allocator.dupe(u8, msg) catch allocator.alloc(u8, 0) catch @constCast(&.{});
     return .{ .status = status, .body = body, .allocator = allocator };
 }
 
