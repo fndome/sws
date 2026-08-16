@@ -133,13 +133,16 @@ pub const RingSharedClient = struct {
     }
 
     pub fn connect(self: *RingSharedClient, host: []const u8, port: u16) !void {
-        const ip = parseIpv4(host) catch blk: {
-            if (self.dns) |dns| {
-                break :blk dns.resolve(host) catch return error.InvalidHost;
-            }
-            return error.InvalidHost;
-        };
+        const ip = try self.resolveHost(host);
         self.connectRaw(ip, port) catch |err| return err;
+    }
+
+    fn resolveHost(self: *RingSharedClient, host: []const u8) !u32 {
+        if (parseIpv4(host)) |ip| return ip;
+        if (self.dns) |dns| {
+            return dns.resolve(host) catch return error.InvalidHost;
+        }
+        return error.InvalidHost;
     }
 
     pub fn connectRaw(self: *RingSharedClient, ip: u32, port: u16) !void {

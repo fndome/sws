@@ -282,25 +282,29 @@ pub fn responseCompleteLenForMethod(data: []const u8, method: []const u8) !?usiz
     }
     const content_len_header = try getSingleHeaderValue(headers, "Content-Length");
     const body_forbidden = responseMayOmitContentLength(status) or methodForbidsResponseBody(method);
-    const content_len = if (body_forbidden) blk: {
+    const content_len = try responseContentLen(status, content_len_header, body_forbidden);
+    // 修改原因：上游 keep-alive 时连接不会 EOF，必须按 Content-Length 判断响应边界。
+    const header_total = std.math.add(usize, bounds.header_end, bounds.sep_len) catch return error.InvalidResponse;
+    const total = std.math.add(usize, header_total, content_len) catch return error.InvalidResponse;
+    if (data.len < total) return null;
+    return total;
+}
+
+fn responseContentLen(status: u16, content_len_header: ?[]const u8, body_forbidden: bool) !usize {
+    if (body_forbidden) {
         if (content_len_header) |value| {
             const declared_len = try parseResponseContentLength(value);
             // 修改原因：204/205 没有响应 body，非 0 Content-Length 不能驱动读取正文或返回伪 body。
             if ((status == 204 or status == 205) and declared_len != 0) return error.InvalidResponse;
         }
         // 修改原因：HEAD/304/205 的 Content-Length 不能作为当前响应读取边界。
-        break :blk 0;
-    } else if (content_len_header) |value| blk: {
-        break :blk try parseResponseContentLength(value);
-    } else {
-        // 修改原因：200 等可带 body 响应缺少长度时无法在 keep-alive 连接上确定边界，不能按空 body 复用连接。
-        return error.MissingContentLength;
-    };
-    // 修改原因：上游 keep-alive 时连接不会 EOF，必须按 Content-Length 判断响应边界。
-    const header_total = std.math.add(usize, bounds.header_end, bounds.sep_len) catch return error.InvalidResponse;
-    const total = std.math.add(usize, header_total, content_len) catch return error.InvalidResponse;
-    if (data.len < total) return null;
-    return total;
+        return 0;
+    }
+    if (content_len_header) |value| {
+        return parseResponseContentLength(value);
+    }
+    // 修改原因：200 等可带 body 响应缺少长度时无法在 keep-alive 连接上确定边界，不能按空 body 复用连接。
+    return error.MissingContentLength;
 }
 
 pub fn responseHasTrailingBytes(total_read: usize, complete_len: usize) bool {
