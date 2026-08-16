@@ -72,6 +72,18 @@ pub const Connection = struct {
     tls: ?*TlsStream = null,
     tls_write_len: u32 = 0,
     tls_ciphertext: ?[]u8 = null,
+
+    /// Whether a fixed file is registered for this connection.
+    pub fn hasFixedFile(self: *const Connection) bool {
+        return self.fixed_index != NO_FIXED_FILE;
+    }
+
+    /// The io_uring fd to use for I/O: the fixed-file index if one is
+    /// registered, otherwise the plain socket fd.
+    pub fn ioFd(self: *const Connection) i32 {
+        if (self.hasFixedFile()) return @intCast(self.fixed_index);
+        return self.fd;
+    }
 };
 
 /// WebSocket 写队列节点（单 IO 线程，无需原子操作）

@@ -81,7 +81,7 @@ pub fn onAcceptComplete(self: *AsyncServer, res: i32, user_data: u64) void {
             // connections only the first MAX_FIXED_FILES use the fast path;
             // the rest operate correctly with regular fd-based I/O.
         }
-        if (conn.fixed_index != NO_FIXED_FILE) {
+        if (conn.hasFixedFile()) {
             if (self.ring.register_files_update(conn.fixed_index, &[_]linux.fd_t{conn_fd})) {
                 // OK — fixed_index was set above
             } else |_| {
@@ -93,7 +93,7 @@ pub fn onAcceptComplete(self: *AsyncServer, res: i32, user_data: u64) void {
 
     self.connections.put(conn_id, conn) catch {
         sticker.slotFree(&self.pool, pool_idx);
-        if (conn.fixed_index != NO_FIXED_FILE) {
+        if (conn.hasFixedFile()) {
             const idx = conn.fixed_index;
             _ = self.ring.register_files_update(idx, &[_]linux.fd_t{-1}) catch |err| logErr("register_files_update failed for idx={d}: {s}", .{ idx, @errorName(err) });
             freeFixedIndex(self, idx);

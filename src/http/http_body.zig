@@ -8,7 +8,6 @@ const packUserData = @import("../stack_pool.zig").packUserData;
 const sticker = @import("../stack_pool_sticker.zig");
 const StreamHandle = @import("../next/chunk_stream.zig").StreamHandle;
 const logErr = @import("http_helpers.zig").logErr;
-const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 
 const BodyReadWindow = struct {
     offset: usize,
@@ -40,10 +39,10 @@ pub fn submitBodyRead(self: *AsyncServer, conn: *Connection, large_buf: []u8, sl
     const window = bodyReadWindow(slot, large_buf.len) orelse return error.InvalidBodyOffset;
     if (window.remaining == 0) return;
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
-    const fd = if (conn.fixed_index != NO_FIXED_FILE) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
+    const fd = conn.ioFd();
     const dest = large_buf[window.offset..][0..window.remaining];
     const sqe = try self.ring.read(user_data, fd, .{ .buffer = dest }, 0);
-    if (conn.fixed_index != NO_FIXED_FILE) sqe.flags |= linux.IOSQE_FIXED_FILE;
+    if (conn.hasFixedFile()) sqe.flags |= linux.IOSQE_FIXED_FILE;
 }
 
 pub fn onBodyChunk(self: *AsyncServer, conn_id: u64, res: i32) void {

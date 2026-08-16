@@ -56,7 +56,7 @@ pub fn onTcpAcceptComplete(self: *AsyncServer, res: i32) void {
         if (self.allocFixedIndex()) |idx| {
             conn.fixed_index = idx;
         } else |_| {}
-        if (conn.fixed_index != NO_FIXED_FILE) {
+        if (conn.hasFixedFile()) {
             if (self.ring.register_files_update(conn.fixed_index, &[_]linux.fd_t{conn_fd})) {} else |_| {
                 self.freeFixedIndex(conn.fixed_index);
                 conn.fixed_index = NO_FIXED_FILE;
@@ -66,7 +66,7 @@ pub fn onTcpAcceptComplete(self: *AsyncServer, res: i32) void {
 
     self.connections.put(conn_id, conn) catch {
         sticker.slotFree(&self.pool, pool_idx);
-        if (conn.fixed_index != NO_FIXED_FILE) {
+        if (conn.hasFixedFile()) {
             const idx = conn.fixed_index;
             _ = self.ring.register_files_update(idx, &[_]linux.fd_t{-1}) catch |err| logErr("register_files_update failed for idx={d}: {s}", .{ idx, @errorName(err) });
             self.freeFixedIndex(idx);

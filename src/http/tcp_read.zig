@@ -22,7 +22,6 @@ const OVERSIZED_THRESHOLD = @import("../stack_pool.zig").OVERSIZED_THRESHOLD;
 const BUFFER_SIZE = @import("../constants.zig").BUFFER_SIZE;
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
 const HTTP_TASK_TAG = @import("../constants.zig").HTTP_TASK_TAG;
-const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 const TlsStream = @import("../tls/tls.zig").TlsStream;
 const READ_BUF_GROUP_ID = @import("../constants.zig").READ_BUF_GROUP_ID;
 const MAX_BUFFERED_BODY_SIZE: u64 = 1024 * 1024;
@@ -71,11 +70,11 @@ pub fn submitRead(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
     // 修改原因：read_buf_recycled 针对单次 read CQE，重新提交 buffer-selection read 前必须重置。
     prepareReadSubmission(conn);
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
-    const fd = if (conn.fixed_index != NO_FIXED_FILE) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
+    const fd = conn.ioFd();
     const sqe = self.ring.read(user_data, fd, .{
         .buffer_selection = .{ .group_id = READ_BUF_GROUP_ID, .len = BUFFER_SIZE },
     }, 0) catch return error.RingFull;
-    if (conn.fixed_index != NO_FIXED_FILE) sqe.flags |= linux.IOSQE_FIXED_FILE;
+    if (conn.hasFixedFile()) sqe.flags |= linux.IOSQE_FIXED_FILE;
 }
 
 pub fn onReadComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe_flags: u32) void {

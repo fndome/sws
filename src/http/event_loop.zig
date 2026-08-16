@@ -13,7 +13,6 @@ const TCP_ACCEPT_USER_DATA = @import("../constants.zig").TCP_ACCEPT_USER_DATA;
 const MAX_CQES_BATCH = @import("../constants.zig").MAX_CQES_BATCH;
 const USER_TASK_BATCH = @import("../constants.zig").USER_TASK_BATCH;
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
-const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 const CLOSE_USER_DATA_FLAG = @import("../stack_pool.zig").CLOSE_USER_DATA_FLAG;
 const packUserData = @import("../stack_pool.zig").packUserData;
 const CLIENT_USER_DATA_FLAG = @import("../shared/io_registry.zig").CLIENT_USER_DATA_FLAG;
@@ -447,11 +446,11 @@ fn submitTlsHandshakeWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, 
     _ = conn_id;
     const tls_stream = conn.tls orelse return error.NoTlsStream;
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
-    const fd = if (conn.fixed_index != NO_FIXED_FILE) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
+    const fd = conn.ioFd();
     tls_stream.pending_handshake_write = true;
     const sqe = self.ring.write(user_data, fd, data, 0) catch {
         tls_stream.pending_handshake_write = false;
         return error.RingFull;
     };
-    if (conn.fixed_index != NO_FIXED_FILE) sqe.flags |= linux.IOSQE_FIXED_FILE;
+    if (conn.hasFixedFile()) sqe.flags |= linux.IOSQE_FIXED_FILE;
 }

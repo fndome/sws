@@ -9,7 +9,6 @@ const packUserData = @import("../stack_pool.zig").packUserData;
 const CLOSE_USER_DATA_FLAG = @import("../stack_pool.zig").CLOSE_USER_DATA_FLAG;
 const ACCEPT_USER_DATA = @import("../constants.zig").ACCEPT_USER_DATA;
 const NO_READ_BUFFER_BID = @import("../constants.zig").NO_READ_BUFFER_BID;
-const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 const logErr = @import("http_helpers.zig").logErr;
 
 pub fn getConn(self: *AsyncServer, conn_id: u64) ?*Connection {
@@ -142,7 +141,7 @@ pub fn closeConn(self: *AsyncServer, conn_id: u64, fd: i32) void {
 
     if (self.use_fixed_files) {
         if (getConn(self, conn_id)) |conn| {
-            if (conn.fixed_index == NO_FIXED_FILE) {
+            if (!conn.hasFixedFile()) {
                 // no fixed file registered; skip deregister
             } else {
                 const idx = conn.fixed_index;

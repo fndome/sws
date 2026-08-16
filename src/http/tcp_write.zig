@@ -8,7 +8,6 @@ const logErr = @import("http_helpers.zig").logErr;
 const milliTimestamp = @import("event_loop.zig").milliTimestamp;
 const TlsStream = @import("../tls/tls.zig").TlsStream;
 const build_options = @import("build_options");
-const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 
 const write_progress = @import("write_progress.zig");
 
@@ -72,7 +71,7 @@ pub fn submitWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
     }
 
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
-    const fd = if (conn.fixed_index != NO_FIXED_FILE) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
+    const fd = conn.ioFd();
 
     const resp_buf = conn.response_buf orelse return;
 
@@ -128,7 +127,7 @@ pub fn submitWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
             try queuePendingWrite(self, conn_id, conn);
             return;
         };
-        if (conn.fixed_index != NO_FIXED_FILE) sqe.flags |= linux.IOSQE_FIXED_FILE;
+        if (conn.hasFixedFile()) sqe.flags |= linux.IOSQE_FIXED_FILE;
     } else {
         if (conn.write_offset >= header_len) return;
         const to_send = resp_buf[conn.write_offset..header_len];
@@ -139,7 +138,7 @@ pub fn submitWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
             try queuePendingWrite(self, conn_id, conn);
             return;
         };
-        if (conn.fixed_index != NO_FIXED_FILE) sqe.flags |= linux.IOSQE_FIXED_FILE;
+        if (conn.hasFixedFile()) sqe.flags |= linux.IOSQE_FIXED_FILE;
     }
 }
 
@@ -226,7 +225,7 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
 fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_stream: *TlsStream) !void {
     if (build_options.tls_enabled) {
     const user_data = packUserData(conn.gen_id, conn.pool_idx);
-    const fd = if (conn.fixed_index != NO_FIXED_FILE) @as(i32, @intCast(conn.fixed_index)) else conn.fd;
+    const fd = conn.ioFd();
 
     const resp_buf = conn.response_buf orelse return;
 
