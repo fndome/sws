@@ -45,6 +45,37 @@ pub fn finishWriteCleanup(self: *AsyncServer, conn: *Connection) void {
     }
 }
 
+/// Close a connection whose write finished with an error or whose retries are
+/// exhausted. Clears the in-flight flag first so closeConn/submitWrite see a
+/// consistent state.
+pub fn failWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) void {
+    if (self.connSlot(conn)) |slot| {
+        slot.line4.writev_in_flight = 0;
+    }
+    self.closeConn(conn_id, conn.fd);
+}
+
+/// Handle a partial write: bump retries, clear the in-flight flag, refresh the
+/// write timer (timeout is measured from last progress, not write start), and
+/// re-submit the write.
+pub fn retryWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) void {
+    conn.write_retries += 1;
+    if (self.connSlot(conn)) |slot| {
+        slot.line4.writev_in_flight = 0;
+    }
+    conn.write_start_ms = milliTimestamp(self.io);
+    if (self.connSlot(conn)) |slot| {
+        slot.line2.write_start_ms = conn.write_start_ms;
+    }
+    self.submitWrite(conn_id, conn) catch |err| {
+        logErr("submitWrite retry failed for fd {d}: {s}", .{ conn.fd, @errorName(err) });
+        if (self.connSlot(conn)) |slot| {
+            slot.line4.writev_in_flight = 0;
+        }
+        self.closeConn(conn_id, conn.fd);
+    };
+}
+
 fn queuePendingWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
     self.pending_writes.append(self.allocator, conn_id) catch {
         // 修改原因：写 SQE 没提交成功时如果连重试队列也入不了，继续返回成功会让连接永久停在 writing。
@@ -146,10 +177,7 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
     _ = user_data;
     if (res <= 0) {
         const conn = self.getConn(conn_id) orelse return;
-        if (self.connSlot(conn)) |slot| {
-            slot.line4.writev_in_flight = 0;
-        }
-        self.closeConn(conn_id, conn.fd);
+        failWrite(self, conn_id, conn);
         return;
     }
     const conn = self.getConn(conn_id) orelse return;
@@ -192,32 +220,10 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
                 self.closeConn(conn_id, conn.fd);
             }
         },
-        .retry => {
-            conn.write_retries += 1;
-            if (self.connSlot(conn)) |slot| {
-                slot.line4.writev_in_flight = 0;
-            }
-            // A partial write CQE means the client is still reading; refresh the
-            // timer so write_timeout_ms measures time since last progress, not
-            // since the write began (otherwise slow large responses are killed).
-            conn.write_start_ms = milliTimestamp(self.io);
-            if (self.connSlot(conn)) |slot| {
-                slot.line2.write_start_ms = conn.write_start_ms;
-            }
-            self.submitWrite(conn_id, conn) catch |err| {
-                logErr("submitWrite failed for fd {}: {s}", .{ conn.fd, @errorName(err) });
-                if (self.connSlot(conn)) |slot| {
-                    slot.line4.writev_in_flight = 0;
-                }
-                self.closeConn(conn_id, conn.fd);
-            };
-        },
+        .retry => retryWrite(self, conn_id, conn),
         .give_up => {
             logErr("write retries exceeded for fd {} ({} attempts, {} bytes total)", .{ conn.fd, conn.write_retries + 1, total });
-            if (self.connSlot(conn)) |slot| {
-                slot.line4.writev_in_flight = 0;
-            }
-            self.closeConn(conn_id, conn.fd);
+            failWrite(self, conn_id, conn);
         },
     }
 }
@@ -291,10 +297,7 @@ fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_strea
 fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32) void {
     if (build_options.tls_enabled) {
     if (res <= 0) {
-        if (self.connSlot(conn)) |slot| {
-            slot.line4.writev_in_flight = 0;
-        }
-        self.closeConn(conn_id, conn.fd);
+        failWrite(self, conn_id, conn);
         return;
     }
 

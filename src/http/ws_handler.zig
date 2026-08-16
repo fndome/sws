@@ -23,6 +23,8 @@ const WS_TASK_TAG = @import("../constants.zig").WS_TASK_TAG;
 const write_progress = @import("write_progress.zig");
 const advanceOffset = write_progress.advanceOffset;
 const finishWriteCleanup = @import("tcp_write.zig").finishWriteCleanup;
+const failWrite = @import("tcp_write.zig").failWrite;
+const retryWrite = @import("tcp_write.zig").retryWrite;
 const MAX_WS_ACCUMULATED_FRAME_SIZE: usize = 1024 * 1024;
 
 fn wsFrameInput(allocator: Allocator, conn: *Connection, data: []u8, owned_out: *?[]u8) ![]u8 {
@@ -414,11 +416,7 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
     _ = user_data;
     if (res <= 0) {
         const conn = self.getConn(conn_id) orelse return;
-        // CQE means kernel is done — clear flag for closeConn & retry
-        if (self.connSlot(conn)) |slot| {
-            slot.line4.writev_in_flight = 0;
-        }
-        self.closeConn(conn_id, conn.fd);
+        failWrite(self, conn_id, conn);
         return;
     }
     const conn = self.getConn(conn_id) orelse return;
@@ -440,28 +438,10 @@ pub fn onWsWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: 
             }
             flushWsWriteQueue(self, conn_id, conn);
         },
-        .retry => {
-            conn.write_retries += 1;
-            // clear flag so submitWrite retry can set it again
-            if (self.connSlot(conn)) |slot| {
-                slot.line4.writev_in_flight = 0;
-            }
-            // Partial progress: refresh the timer so write_timeout_ms tracks time
-            // since last progress rather than since the write started.
-            conn.write_start_ms = milliTimestamp(self.io);
-            if (self.connSlot(conn)) |slot| {
-                slot.line2.write_start_ms = conn.write_start_ms;
-            }
-            self.submitWrite(conn_id, conn) catch {
-                self.closeConn(conn_id, conn.fd);
-            };
-        },
+        .retry => retryWrite(self, conn_id, conn),
         .give_up => {
             logErr("ws write retries exceeded for fd {} ({} attempts)", .{ conn.fd, conn.write_retries + 1 });
-            if (self.connSlot(conn)) |slot| {
-                slot.line4.writev_in_flight = 0;
-            }
-            self.closeConn(conn_id, conn.fd);
+            failWrite(self, conn_id, conn);
         },
     }
 }

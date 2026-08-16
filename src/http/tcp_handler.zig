@@ -17,6 +17,8 @@ const NO_FIXED_FILE = @import("../constants.zig").NO_FIXED_FILE;
 const write_progress = @import("write_progress.zig");
 const advanceOffset = write_progress.advanceOffset;
 const finishWriteCleanup = @import("tcp_write.zig").finishWriteCleanup;
+const failWrite = @import("tcp_write.zig").failWrite;
+const retryWrite = @import("tcp_write.zig").retryWrite;
 
 pub fn onTcpAcceptComplete(self: *AsyncServer, res: i32) void {
     self.tcp_accept_outstanding = false;
@@ -213,10 +215,7 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
     _ = user_data;
     if (res <= 0) {
         const conn = self.getConn(conn_id) orelse return;
-        if (self.connSlot(conn)) |slot| {
-            slot.line4.writev_in_flight = 0;
-        }
-        self.closeConn(conn_id, conn.fd);
+        failWrite(self, conn_id, conn);
         return;
     }
     const conn = self.getConn(conn_id) orelse return;
@@ -240,31 +239,10 @@ pub fn onTcpWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data:
                 self.closeConn(conn_id, conn.fd);
             }
         },
-        .retry => {
-            conn.write_retries += 1;
-            if (self.connSlot(conn)) |slot| {
-                slot.line4.writev_in_flight = 0;
-            }
-            // Partial progress: refresh the timer so write_timeout_ms tracks time
-            // since last progress rather than since the write started.
-            conn.write_start_ms = milliTimestamp(self.io);
-            if (self.connSlot(conn)) |slot| {
-                slot.line2.write_start_ms = conn.write_start_ms;
-            }
-            self.submitWrite(conn_id, conn) catch |err| {
-                logErr("submitWrite failed for tcp fd={d}: {s}", .{ conn.fd, @errorName(err) });
-                if (self.connSlot(conn)) |slot| {
-                    slot.line4.writev_in_flight = 0;
-                }
-                self.closeConn(conn_id, conn.fd);
-            };
-        },
+        .retry => retryWrite(self, conn_id, conn),
         .give_up => {
             logErr("tcp write retries exceeded for fd={d}", .{conn.fd});
-            if (self.connSlot(conn)) |slot| {
-                slot.line4.writev_in_flight = 0;
-            }
-            self.closeConn(conn_id, conn.fd);
+            failWrite(self, conn_id, conn);
         },
     }
 }
