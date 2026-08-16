@@ -28,10 +28,7 @@ fn validateResponseHeader(key: []const u8, value: []const u8) !void {
     }
 }
 
-pub const RouteParam = struct {
-    name: []const u8,
-    value: []const u8,
-};
+pub const RouteParam = @import("route_match.zig").RouteParam;
 
 pub const Context = struct {
     pub const ContentType = enum { plain, json, html };

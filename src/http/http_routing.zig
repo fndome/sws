@@ -28,11 +28,12 @@ const httpTaskExecWrapperWithOwnership = http_fiber.httpTaskExecWrapperWithOwner
 const httpTaskComplete = http_fiber.httpTaskComplete;
 const statusText = http_response.statusText;
 
-pub const Segment = union(enum) {
-    literal: []const u8,
-    param: []const u8,
-    wildcard: void,
-};
+const route_match = @import("route_match.zig");
+pub const Segment = route_match.Segment;
+pub const RouteParam = route_match.RouteParam;
+pub const MAX_PARAMS = route_match.MAX_PARAMS;
+pub const parseParamPattern = route_match.parseParamPattern;
+pub const freeSegments = route_match.freeSegments;
 
 pub const ParamRoute = struct {
     method: []const u8,
@@ -40,88 +41,12 @@ pub const ParamRoute = struct {
     handler: Handler,
 };
 
-pub const RouteParam = @import("context.zig").RouteParam;
-
-/// Maximum path parameters captured per route match.
-const MAX_PARAMS: usize = 16;
-
-pub fn parseParamPattern(allocator: Allocator, pattern: []const u8) ![]const Segment {
-    var segments = std.ArrayList(Segment).empty;
-    errdefer {
-        for (segments.items) |seg| {
-            if (seg == .literal or seg == .param) {
-                allocator.free(@as([]const u8, switch (seg) {
-                    .literal => |lit| lit,
-                    .param => |p| p,
-                    .wildcard => unreachable,
-                }));
-            }
-        }
-        segments.deinit(allocator);
-    }
-
-    var iter = std.mem.splitScalar(u8, pattern, '/');
-    while (iter.next()) |part| {
-        if (part.len == 0) continue;
-        if (std.mem.eql(u8, part, "*")) {
-            try segments.append(allocator, .wildcard);
-        } else if (part[0] == ':') {
-            const name = try allocator.dupe(u8, part[1..]);
-            try segments.append(allocator, .{ .param = name });
-        } else {
-            const lit = try allocator.dupe(u8, part);
-            try segments.append(allocator, .{ .literal = lit });
-        }
-    }
-    return segments.toOwnedSlice(allocator);
-}
-
-pub fn freeSegments(allocator: Allocator, segments: []const Segment) void {
-    for (segments) |seg| {
-        if (seg == .literal) allocator.free(seg.literal);
-        if (seg == .param) allocator.free(seg.param);
-    }
-    allocator.free(segments);
-}
-
-pub fn matchParamRoute(route: ParamRoute, path: []const u8, params: *[MAX_PARAMS]RouteParam) ?usize {
-    var path_iter = std.mem.splitScalar(u8, path, '/');
-    var param_idx: usize = 0;
-    var seg_idx: usize = 0;
-
-    while (path_iter.next()) |part| {
-        if (part.len == 0) continue;
-        if (seg_idx >= route.segments.len) return null;
-
-        const segment = route.segments[seg_idx];
-        switch (segment) {
-            .literal => |lit| {
-                if (!std.mem.eql(u8, lit, part)) return null;
-            },
-            .param => |name| {
-                if (param_idx < params.len) {
-                    params[param_idx] = .{ .name = name, .value = part };
-                    param_idx += 1;
-                } else {
-                    return null;
-                }
-            },
-            .wildcard => {
-                return param_idx;
-            },
-        }
-        seg_idx += 1;
-    }
-
-    return if (seg_idx == route.segments.len) param_idx else null;
-}
-
 /// Searches param_routes for a handler matching method + path.
 /// Returns handler and params on match, null otherwise.
 pub fn findParamHandler(server: *AsyncServer, method: []const u8, path: []const u8, params: *[MAX_PARAMS]RouteParam) ?struct { handler: Handler, param_count: usize } {
     for (server.param_routes.items) |route| {
         if (!std.mem.eql(u8, route.method, method)) continue;
-        if (matchParamRoute(route, path, params)) |param_count| {
+        if (route_match.matchParamRoute(route.segments, path, params)) |param_count| {
             return .{ .handler = route.handler, .param_count = param_count };
         }
     }
@@ -535,73 +460,6 @@ test "appendPreciseMiddleware rolls back inserted key on append failure" {
 
         try std.testing.expectEqual(@as(usize, 1), precise.count());
     }
-}
-
-test "parseParamPattern handles mixed literal and param segments" {
-    const allocator = std.testing.allocator;
-    const segments = try parseParamPattern(allocator, "/users/:id/posts/:postId");
-    defer freeSegments(allocator, segments);
-
-    try std.testing.expectEqual(@as(usize, 4), segments.len);
-    try std.testing.expect(segments[0] == .literal);
-    try std.testing.expectEqualStrings("users", segments[0].literal);
-    try std.testing.expect(segments[1] == .param);
-    try std.testing.expectEqualStrings("id", segments[1].param);
-    try std.testing.expect(segments[2] == .literal);
-    try std.testing.expectEqualStrings("posts", segments[2].literal);
-    try std.testing.expect(segments[3] == .param);
-    try std.testing.expectEqualStrings("postId", segments[3].param);
-}
-
-test "parseParamPattern handles wildcard" {
-    const allocator = std.testing.allocator;
-    const segments = try parseParamPattern(allocator, "/static/*");
-    defer freeSegments(allocator, segments);
-
-    try std.testing.expectEqual(@as(usize, 2), segments.len);
-    try std.testing.expect(segments[0] == .literal);
-    try std.testing.expectEqualStrings("static", segments[0].literal);
-    try std.testing.expect(segments[1] == .wildcard);
-}
-
-test "matchParamRoute extracts single and multiple params" {
-    const allocator = std.testing.allocator;
-    const segments = try parseParamPattern(allocator, "/users/:userId/posts/:postId");
-    defer freeSegments(allocator, segments);
-
-    const route = ParamRoute{
-        .method = "GET",
-        .segments = segments,
-        .handler = undefined,
-    };
-
-    var params_buf: [16]RouteParam = undefined;
-
-    const count = matchParamRoute(route, "/users/42/posts/99", &params_buf);
-    try std.testing.expect(count != null);
-    try std.testing.expectEqual(@as(usize, 2), count.?);
-    try std.testing.expectEqualStrings("userId", params_buf[0].name);
-    try std.testing.expectEqualStrings("42", params_buf[0].value);
-    try std.testing.expectEqualStrings("postId", params_buf[1].name);
-    try std.testing.expectEqualStrings("99", params_buf[1].value);
-}
-
-test "matchParamRoute returns null on mismatch" {
-    const allocator = std.testing.allocator;
-    const segments = try parseParamPattern(allocator, "/users/:id");
-    defer freeSegments(allocator, segments);
-
-    const route = ParamRoute{
-        .method = "GET",
-        .segments = segments,
-        .handler = undefined,
-    };
-
-    var params_buf: [16]RouteParam = undefined;
-
-    try std.testing.expect(matchParamRoute(route, "/posts/42", &params_buf) == null);
-    try std.testing.expect(matchParamRoute(route, "/users/42/extra", &params_buf) == null);
-    try std.testing.expect(matchParamRoute(route, "/users", &params_buf) == null);
 }
 
 test "Context.param looks up captured path params" {
