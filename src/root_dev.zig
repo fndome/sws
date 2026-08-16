@@ -24,4 +24,7 @@ test {
     _ = @import("dns/cache.zig");
     _ = @import("spsc_ringbuffer.zig");
     _ = @import("ws/frame.zig");
+    _ = @import("ws/upgrade.zig");
+    _ = @import("ws/server.zig");
+    _ = @import("udp/buffer.zig");
 }

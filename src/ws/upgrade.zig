@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const websocket_magic = "258EAFA5-E914-47DA-95CA-5AB9DC11B85B";
+const websocket_magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub fn isUpgradeRequest(data: []const u8) bool {
     if (std.mem.indexOf(u8, data, "\r\n\r\n") == null) return false;
