@@ -120,7 +120,9 @@ test {
     _ = @import("http/route_match.zig");
     _ = @import("http/context.zig");
     _ = @import("http/write_progress.zig");
+    _ = @import("http/http_parser.zig");
     _ = @import("shared/tcp_stream_helpers.zig");
+    _ = @import("shared/large_buffer_pool.zig");
     _ = @import("dns/packet.zig");
     _ = @import("dns/cache.zig");
     _ = @import("spsc_ringbuffer.zig");

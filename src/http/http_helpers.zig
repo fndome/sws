@@ -206,5 +206,6 @@ test "parseNameserverLine accepts whitespace separated resolv.conf entries" {
 }
 
 test "openReadOnly reports missing files through errno" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     try std.testing.expectError(error.FileNotFound, openReadOnly("/tmp/sws-definitely-missing-resolv.conf\x00"));
 }
