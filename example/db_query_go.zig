@@ -1,7 +1,7 @@
 /// ── Next.go queries the database (naturally available, no init in main needed) ──
 ///
 /// Next.go: pushes to the ringbuffer → runs on an IO thread fiber, no thread switch.
-/// The first server.GET call automatically calls setDefault(), works out of the box.
+/// The scheduler is obtained lazily via `server.scheduler()` — no global instance.
 ///
 /// Suitable for: io_uring async DB
 
@@ -11,7 +11,6 @@ const sws = @import("sws");
 const Context = sws.Context;
 const DeferredResponse = sws.DeferredResponse;
 const AsyncServer = sws.AsyncServer;
-const Next = sws.Next;
 
 const Ctx = struct {
     allocator: std.mem.Allocator,
@@ -34,7 +33,8 @@ pub fn findUsers(allocator: std.mem.Allocator, ctx: *Context) anyerror!void {
     resp.* = .{ .server = s, .conn_id = ctx.conn_id, .allocator = allocator };
 
     ctx.deferred = true;
-    if (!Next.go(Ctx, .{ .allocator = allocator, .resp = resp, .sql = "SELECT * FROM users" }, exec)) {
+    const scheduler = try s.scheduler();
+    if (!scheduler.go(Ctx, .{ .allocator = allocator, .resp = resp, .sql = "SELECT * FROM users" }, exec)) {
         ctx.deferred = false;
         allocator.destroy(resp);
         return error.QueueFull;

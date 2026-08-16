@@ -21,26 +21,37 @@ pub const CompatServer = struct {
 
     pub const TlsAuth = opaque {};
 
-    pub const InitConfig = struct {
-        max_connections: u32 = 0,
+    /// Source-compatible mirror of the production `AsyncServer.Config`.
+    /// The DevServer ignores io_uring-specific tunables but accepts them so
+    /// non-Linux dev code shares the exact same `init` call shape as production.
+    pub const Config = struct {
+        listen_addr: []const u8,
+        app_ctx: ?*anyopaque = null,
+        tls_auth: ?*anyopaque = null,
+        max_header_buffer_size: u32 = 0,
+        max_response_buffer_size: u32 = 0,
+        max_cqes_batch: u32 = 0,
+        ring_entries: u32 = 0,
+        task_queue_size: u32 = 0,
+        response_queue_size: u32 = 0,
+        buffer_size: u32 = 0,
         buffer_pool_size: u32 = 0,
-        large_pool_capacity: u32 = 0,
+        max_fixed_files: u32 = 0,
+        max_path_length: u32 = 0,
+        idle_timeout_ms: u64 = 0,
+        write_timeout_ms: u64 = 0,
+        fiber_stack_size_kb: u16 = 256,
+        max_connections: u32 = 0,
+        large_pool_capacity: u32 = 64,
+        io_cpu: ?u6 = null,
+        log_cpu: ?u6 = null,
     };
 
-    pub fn init(
-        allocator: Allocator,
-        io: std.Io,
-        bind_addr: []const u8,
-        app_ctx: ?*anyopaque,
-        fiber_stack_size_kb: u16,
-        tls_auth: ?*anyopaque,
-        init_cfg: InitConfig,
-    ) !CompatServer {
+    pub fn init(allocator: Allocator, io: std.Io, config: Config) !CompatServer {
         _ = io;
-        _ = fiber_stack_size_kb;
-        _ = tls_auth;
-        _ = init_cfg;
-        const inner = try DevServer.init(allocator, bind_addr, app_ctx);
+        _ = config.tls_auth;
+        _ = config.fiber_stack_size_kb;
+        const inner = try DevServer.init(allocator, config.listen_addr, config.app_ctx);
         return .{ .inner = inner };
     }
 

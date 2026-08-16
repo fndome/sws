@@ -390,7 +390,7 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
             } else {
                 var fiber = Fiber.init(self.shared_fiber_stack);
                 self.shared_fiber_active = true;
-                fiber.exec(.{
+                _ = fiber.exec(.{
                     .userCtx = t,
                     .complete = fiber_task.wsTaskComplete,
                     .execFn = fiber_task.wsTaskExec,

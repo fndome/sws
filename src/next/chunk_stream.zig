@@ -1,7 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const DeferredResponse = @import("../deferred.zig").DeferredResponse;
-const Next = @import("next.zig").Next;
 
 pub const ProcessFn = *const fn (ctx: ?*anyopaque, chunk: []const u8, resp: *DeferredResponse) void;
 
@@ -101,7 +100,12 @@ pub const StreamHandle = struct {
             .job_id = self.job_id,
             .slot_idx = self.slot_idx,
         };
-        if (!Next.trySubmit(ChunkDispatchCtx, ctx, runChunkWorker)) {
+        const scheduler = self.resp.server.scheduler() catch {
+            self.resp.allocator.free(chunk_copy);
+            self.dropped = true;
+            return;
+        };
+        if (!scheduler.trySubmit(ChunkDispatchCtx, ctx, runChunkWorker)) {
             self.resp.allocator.free(chunk_copy);
             self.dropped = true;
         }

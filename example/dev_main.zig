@@ -16,8 +16,8 @@ pub fn main() !void {
     const bind_addr = try std.fmt.allocPrint(alloc, "0.0.0.0:{d}", .{port});
     defer alloc.free(bind_addr);
 
-    // DevServer uses std.net internally; io/stack/tls params are ignored
-    var server = try AsyncServer.init(alloc, undefined, bind_addr, null, 64, null, .{});
+    // DevServer uses std.net internally; io/tls tunables are ignored
+    var server = try AsyncServer.init(alloc, undefined, .{ .listen_addr = bind_addr });
     defer server.deinit();
 
     try server.initPool4NextSubmit(2);

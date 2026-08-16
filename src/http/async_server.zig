@@ -180,6 +180,9 @@ pub const AsyncServer = struct {
     const Self = @This();
 
     pub const Config = struct {
+        listen_addr: []const u8,
+        app_ctx: ?*anyopaque = null,
+        tls_auth: ?TlsAuth = null,
         max_header_buffer_size: u32 = constants.MAX_HEADER_BUFFER_SIZE,
         max_response_buffer_size: u32 = constants.MAX_RESPONSE_BUFFER_SIZE,
         max_cqes_batch: u32 = constants.MAX_CQES_BATCH,
@@ -194,58 +197,15 @@ pub const AsyncServer = struct {
         write_timeout_ms: u64 = constants.WRITE_TIMEOUT_MS,
         fiber_stack_size_kb: u16 = 256,
         max_connections: u32 = constants.MAX_CONNECTIONS,
+        large_pool_capacity: u32 = 64,
         io_cpu: ?u6 = null,
         log_cpu: ?u6 = null,
     };
 
-    pub const InitConfig = struct {
-        max_connections: u32 = constants.MAX_CONNECTIONS,
-        buffer_pool_size: u32 = constants.BUFFER_POOL_SIZE,
-        large_pool_capacity: u32 = 64,
-    };
-
-    pub const ConfigKey = enum {
-        max_header_buffer_size,
-        max_response_buffer_size,
-        max_cqes_batch,
-        ring_entries,
-        task_queue_size,
-        response_queue_size,
-        buffer_size,
-        buffer_pool_size,
-        max_fixed_files,
-        max_path_length,
-        idle_timeout_ms,
-        write_timeout_ms,
-        max_connections,
-        io_cpu,
-        log_cpu,
-    };
-
-    pub fn config(self: *Self, key: ConfigKey, value: i32) void {
-        switch (key) {
-            .max_header_buffer_size => self.cfg.max_header_buffer_size = @intCast(value),
-            .max_response_buffer_size => self.cfg.max_response_buffer_size = @intCast(value),
-            .max_cqes_batch => self.cfg.max_cqes_batch = @intCast(value),
-            .ring_entries => self.cfg.ring_entries = @intCast(value),
-            .task_queue_size => self.cfg.task_queue_size = @intCast(value),
-            .response_queue_size => self.cfg.response_queue_size = @intCast(value),
-            .buffer_size => self.cfg.buffer_size = @intCast(value),
-            .buffer_pool_size => self.cfg.buffer_pool_size = @intCast(value),
-            .max_fixed_files => self.cfg.max_fixed_files = @intCast(value),
-            .max_path_length => self.cfg.max_path_length = @intCast(value),
-            .idle_timeout_ms => self.cfg.idle_timeout_ms = @intCast(value),
-            .write_timeout_ms => self.cfg.write_timeout_ms = @intCast(value),
-            .max_connections => self.cfg.max_connections = @intCast(value),
-            .io_cpu => self.cfg.io_cpu = if (value < 0) null else @intCast(value),
-            .log_cpu => self.cfg.log_cpu = if (value < 0) null else @intCast(value),
-        }
-    }
-
-    pub fn init(allocator: Allocator, io: std.Io, listen_addr: []const u8, app_ctx: ?*anyopaque, fiber_stack_size_kb: u16, tls_auth: ?TlsAuth, init_cfg: InitConfig) !Self {
-        const colon = std.mem.indexOfScalar(u8, listen_addr, ':') orelse return error.InvalidListenAddress;
-        const ip_str = listen_addr[0..colon];
-        const port_str = listen_addr[colon + 1 ..];
+    pub fn init(allocator: Allocator, io: std.Io, config: Config) !Self {
+        const colon = std.mem.indexOfScalar(u8, config.listen_addr, ':') orelse return error.InvalidListenAddress;
+        const ip_str = config.listen_addr[0..colon];
+        const port_str = config.listen_addr[colon + 1 ..];
         const port = try std.fmt.parseInt(u16, port_str, 10);
         const ip_addr = try parseIpv4(ip_str);
 
@@ -279,7 +239,7 @@ pub const AsyncServer = struct {
 
         var tls_config: if (build_options.tls_enabled) ?TlsConfig else void = if (build_options.tls_enabled) null else {};
         if (build_options.tls_enabled) {
-            if (tls_auth) |auth| {
+            if (config.tls_auth) |auth| {
                 tls_config = try TlsConfig.init(allocator, io, auth.cert_path, auth.key_path, true);
             }
         }
@@ -307,11 +267,12 @@ pub const AsyncServer = struct {
             use_ff = true;
         } else |_| {}
 
-        var bp = try BufferPool.init(allocator, init_cfg.buffer_pool_size);
+        var bp = try BufferPool.init(allocator, config.buffer_pool_size);
         errdefer bp.deinit();
 
-        const kb = if (fiber_stack_size_kb == 0) @as(u16, 256) else fiber_stack_size_kb;
-        const cfg = Config{ .fiber_stack_size_kb = kb, .max_connections = init_cfg.max_connections, .buffer_pool_size = init_cfg.buffer_pool_size };
+        const kb = if (config.fiber_stack_size_kb == 0) @as(u16, 256) else config.fiber_stack_size_kb;
+        var cfg = config;
+        cfg.fiber_stack_size_kb = kb;
         const stack_size = @as(u32, @intCast(kb)) * 1024;
         const shared_stack = try allocator.alloc(u8, stack_size);
         errdefer allocator.free(shared_stack);
@@ -325,11 +286,11 @@ pub const AsyncServer = struct {
         dns_resolver.* = try DnsResolver.init(allocator, io, ns_ip);
         errdefer dns_resolver.deinit();
 
-        var conn_pool = try StackPool(StackSlot).init(allocator, cfg.max_connections);
+        var conn_pool = try StackPool(StackSlot).init(allocator, config.max_connections);
         errdefer conn_pool.deinit(allocator);
         conn_pool.warmup();
 
-        var large_pool_cap = init_cfg.large_pool_capacity;
+        var large_pool_cap = config.large_pool_capacity;
         if (large_pool_cap == 0) large_pool_cap = 64;
         var large_pool = try LargeBufferPool(64).init(allocator, large_pool_cap);
         errdefer large_pool.deinit(allocator);
@@ -356,7 +317,7 @@ pub const AsyncServer = struct {
             .io_registry = io_registry,
             .rs = undefined,
             .next_user_data = 1,
-            .app_ctx = app_ctx,
+            .app_ctx = config.app_ctx,
             .buffer_pool = bp,
             .large_pool = large_pool,
             .use_fixed_files = use_ff,
@@ -506,7 +467,7 @@ pub const AsyncServer = struct {
         self.cfg = undefined;
     }
 
-    /// Register middleware to run in a fiber. Use Next.submit() to offload CPU-heavy work.
+    /// Register middleware to run in a fiber. Use scheduler().submit() to offload CPU-heavy work.
     pub fn use(self: *Self, pattern: []const u8, middleware: Middleware) !void {
         return http_routing.use(self, pattern, middleware);
     }
@@ -518,6 +479,13 @@ pub const AsyncServer = struct {
 
     fn ensureNext(self: *Self) !void {
         try http_routing.ensureNext(self);
+    }
+
+    /// Lazily creates and returns the fiber scheduler (Next). The scheduler is
+    /// owned by this server; there is no global/default instance.
+    pub fn scheduler(self: *Self) !*Next {
+        try self.ensureNext();
+        return &self.next.?;
     }
 
     fn register(self: *Self, method: []const u8, path: []const u8, handler: Handler) !void {

@@ -14,7 +14,6 @@ const sws = @import("sws");
 const Context = sws.Context;
 const DeferredResponse = sws.DeferredResponse;
 const AsyncServer = sws.AsyncServer;
-const Next = sws.Next;
 
 const InferCtx = struct {
     allocator: std.mem.Allocator,
@@ -46,7 +45,7 @@ pub fn inferHandler(allocator: std.mem.Allocator, ctx: *Context) anyerror!void {
     resp.* = .{ .server = s, .conn_id = ctx.conn_id, .allocator = allocator };
 
     ctx.deferred = true;
-    Next.submit(InferCtx, .{
+    (try s.scheduler()).submit(InferCtx, .{
         .allocator = allocator,
         .resp = resp,
         .prompt = "Hello, how are you?",

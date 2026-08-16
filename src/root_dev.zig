@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const Config = @import("dev/compat.zig").CompatServer.Config;
+
 pub const AsyncServer = @import("dev/compat.zig").CompatServer;
 pub const DevServer = @import("dev/server.zig").DevServer;
 

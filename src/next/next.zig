@@ -15,8 +15,6 @@ const TaskCtx = struct {
     stack_size: u32,
 };
 
-var default_next: ?*Next = null;
-
 /// ── Next ──────────────────────────────────────────────────
 pub const Next = struct {
     ringbuffer: *SubmitQueue,
@@ -53,33 +51,27 @@ pub const Next = struct {
         self.pool = p;
     }
 
-    pub fn setDefault(self: *Next) void {
-        @atomicStore(?*Next, &default_next, self, .release);
-    }
-
     pub fn submit(
+        self: *Next,
         comptime T: type,
         ctx: T,
         comptime execFn: fn (*T, *const fn (?*anyopaque, []const u8) void) void,
     ) void {
-        _ = trySubmit(T, ctx, execFn);
+        _ = self.trySubmit(T, ctx, execFn);
     }
 
     pub fn trySubmit(
+        self: *Next,
         comptime T: type,
         ctx: T,
         comptime execFn: fn (*T, *const fn (?*anyopaque, []const u8) void) void,
     ) bool {
-        const n = @atomicLoad(?*Next, &default_next, .acquire) orelse {
-            logErr("Next.submit: no default Next instance set", .{});
-            return false;
-        };
-        const user = n.allocator.create(T) catch return false;
+        const user = self.allocator.create(T) catch return false;
         user.* = ctx;
 
-        if (n.pool) |p| {
-            const task = n.allocator.create(PoolTask) catch {
-                n.allocator.destroy(user);
+        if (self.pool) |p| {
+            const task = self.allocator.create(PoolTask) catch {
+                self.allocator.destroy(user);
                 return false;
             };
             task.* = .{
@@ -95,7 +87,7 @@ pub const Next = struct {
                     }
                 }.run,
                 .ctx = user,
-                .alloc = n.allocator,
+                .alloc = self.allocator,
             };
             p.submit(task);
             return true;
@@ -103,33 +95,27 @@ pub const Next = struct {
 
         // No pool — log error, destroy user ctx
         logErr("Next.submit: no worker pool configured. Call initPool4NextSubmit(n) first.", .{});
-        n.allocator.destroy(user);
+        self.allocator.destroy(user);
         return false;
     }
 
     pub fn go(
+        self: *Next,
         comptime T: type,
         ctx: T,
         comptime execFn: fn (*T, *const fn (?*anyopaque, []const u8) void) void,
     ) bool {
-        const n = @atomicLoad(?*Next, &default_next, .acquire) orelse {
-            logErr("Next.go: no default Next instance set", .{});
-            return false;
-        };
-        return n.push(T, ctx, execFn, n.default_stack_size);
+        return self.push(T, ctx, execFn, self.default_stack_size);
     }
 
     pub fn goWithStackConfigurable(
+        self: *Next,
         comptime T: type,
         ctx: T,
         comptime execFn: fn (*T, *const fn (?*anyopaque, []const u8) void) void,
         stack_size: u32,
     ) bool {
-        const n = @atomicLoad(?*Next, &default_next, .acquire) orelse {
-            logErr("Next.goWithStackConfigurable: no default Next instance set", .{});
-            return false;
-        };
-        return n.push(T, ctx, execFn, stack_size);
+        return self.push(T, ctx, execFn, stack_size);
     }
 
     pub fn push(
@@ -162,7 +148,7 @@ pub const Next = struct {
                     };
 
                     var temp_fiber = Fiber.init(stack);
-                    temp_fiber.exec(.{
+                    _ = temp_fiber.exec(.{
                         .userCtx = u,
                         .complete = complete,
                         .execFn = struct {
@@ -244,6 +230,7 @@ pub const Next = struct {
         const svr = http_ctx.server orelse return;
         const server: *AsyncServer = @ptrCast(@alignCast(svr));
         const alloc = http_ctx.allocator;
+        const n = try server.scheduler();
 
         const resp = try alloc.create(DeferredResponse);
         errdefer alloc.destroy(resp);
@@ -253,11 +240,11 @@ pub const Next = struct {
         // get back to ChainWrap via @fieldParentPtr("user", user_ptr)
         const w = try alloc.create(ChainWrap(T));
         errdefer alloc.destroy(w);
-        w.* = .{ .user = user_ctx, .chain = .{ .resp = resp, .allocator = alloc } };
+        w.* = .{ .user = user_ctx, .chain = .{ .resp = resp, .allocator = alloc, .next = n } };
 
         http_ctx.deferred = true;
 
-        if (!go(
+        if (!n.go(
             ChainWrap(T),
             w.*,
             struct {
@@ -279,7 +266,7 @@ pub const Next = struct {
                             };
                             sc.* = .{ .user = w2.user, .resp = resp2, .allocator = alloc2 };
 
-                            submit(
+                            w2.chain.next.submit(
                                 ChainSubmitCtx(T),
                                 sc.*,
                                 struct {
@@ -323,6 +310,7 @@ fn ChainWrap(comptime T: type) type {
 const ChainGoCtx = struct {
     resp: *Next.DeferredResponse,
     allocator: Allocator,
+    next: *Next,
 };
 
 fn ChainSubmitCtx(comptime T: type) type {

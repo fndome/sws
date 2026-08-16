@@ -78,7 +78,7 @@ fn appendPreciseMiddleware(allocator: Allocator, precise: *std.StringHashMap(std
     try gop.value_ptr.append(allocator, middleware);
 }
 
-/// Register middleware to run in a fiber. Use Next.submit() to offload CPU-heavy work.
+/// Register middleware to run in a fiber. Use scheduler().submit() to offload CPU-heavy work.
 pub fn use(self: *AsyncServer, pattern: []const u8, middleware: Middleware) !void {
     try ensureNext(self);
 
@@ -160,7 +160,6 @@ pub fn ensureNext(self: *AsyncServer) !void {
     if (self.next != null) return;
     const kb = if (self.cfg.fiber_stack_size_kb == 0) @as(u16, 64) else self.cfg.fiber_stack_size_kb;
     self.next = try Next.init(self.allocator, @as(u32, @intCast(kb)) * 1024);
-    self.next.?.setDefault();
 }
 
 pub fn register(self: *AsyncServer, method: []const u8, path: []const u8, handler: Handler) !void {
@@ -416,7 +415,7 @@ pub fn processBodyRequest(self: *AsyncServer, conn_id: u64, conn: *Connection, b
         } else {
             var fiber = Fiber.init(self.shared_fiber_stack);
             self.shared_fiber_active = true;
-            fiber.exec(.{
+            _ = fiber.exec(.{
                 .userCtx = t,
                 .complete = httpTaskComplete,
                 .execFn = httpTaskExec,

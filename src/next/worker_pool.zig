@@ -11,7 +11,7 @@ pub const PoolTask = struct {
 };
 
 const ParkedTask = struct {
-    fiber_ctx: std.Io.fiber.Context,
+    fiber: *Fiber,
     task: *PoolTask,
     poll_fn: *const fn (*anyopaque) bool,
     poll_ctx: *anyopaque,
@@ -187,28 +187,30 @@ fn runTask(pool: *WorkerPool, task: *PoolTask, parked: *std.ArrayList(ParkedTask
         pool.allocator.destroy(task);
         return;
     };
-    var fiber = Fiber.init(stack);
+    const fiber = pool.allocator.create(Fiber) catch {
+        pool.releaseStack(stack);
+        pool.allocator.destroy(task);
+        return;
+    };
+    fiber.* = Fiber.init(stack);
     const call = makeFiberCall(task);
-    fiber.exec(call);
 
-    if (Fiber.isYielded()) {
-        const ctx = @import("fiber.zig").parked_ctx orelse {
+    var yield_info = fiber.exec(call);
+    if (yield_info) |*yi| {
+        const poll = yi.poll orelse {
+            pool.allocator.destroy(fiber);
             pool.releaseStack(stack);
             pool.allocator.destroy(task);
             return;
         };
-        const poll = @import("fiber.zig").parked_poll orelse {
-            pool.releaseStack(stack);
-            pool.allocator.destroy(task);
-            return;
-        };
-        const poll_ctx = @import("fiber.zig").parked_poll_ctx orelse {
+        const poll_ctx = yi.poll_ctx orelse {
+            pool.allocator.destroy(fiber);
             pool.releaseStack(stack);
             pool.allocator.destroy(task);
             return;
         };
         parked.append(pool.allocator, .{
-            .fiber_ctx = ctx.*,
+            .fiber = fiber,
             .task = task,
             .poll_fn = poll,
             .poll_ctx = poll_ctx,
@@ -216,18 +218,15 @@ fn runTask(pool: *WorkerPool, task: *PoolTask, parked: *std.ArrayList(ParkedTask
         }) catch {
             // OOM: resume the fiber to completion. If it yields again after
             // the resume, the task and stack are leaked (cannot re-append
-            // under memory pressure). Release them to bound the damage.
+            // under memory pressure). Free what we own to bound the damage.
             @import("fiber.zig").saved_call = call;
-            Fiber.resumeContext(ctx);
-            if (Fiber.isYielded()) {
-                pool.releaseStack(stack);
-                pool.allocator.destroy(task);
-            }
+            Fiber.resumeContext(fiber);
+            pool.allocator.destroy(fiber);
+            pool.releaseStack(stack);
+            pool.allocator.destroy(task);
         };
-        @import("fiber.zig").parked_ctx = null;
-        @import("fiber.zig").parked_poll = null;
-        @import("fiber.zig").parked_poll_ctx = null;
     } else {
+        pool.allocator.destroy(fiber);
         pool.releaseStack(stack);
         pool.allocator.destroy(task);
     }
@@ -235,26 +234,29 @@ fn runTask(pool: *WorkerPool, task: *PoolTask, parked: *std.ArrayList(ParkedTask
 
 fn resumeParked(pool: *WorkerPool, pt: *ParkedTask, parked: *std.ArrayList(ParkedTask)) void {
     @import("fiber.zig").saved_call = makeFiberCall(pt.task);
-    Fiber.resumeContext(&pt.fiber_ctx);
+    Fiber.resumeContext(pt.fiber);
 
     if (Fiber.isYielded()) {
-        const ctx = @import("fiber.zig").parked_ctx orelse {
+        const yield_info = pt.fiber.yield_info orelse {
+            pool.allocator.destroy(pt.fiber);
             pool.releaseStack(pt.stack);
             pool.allocator.destroy(pt.task);
             return;
         };
-        const poll = @import("fiber.zig").parked_poll orelse {
+        const poll = yield_info.poll orelse {
+            pool.allocator.destroy(pt.fiber);
             pool.releaseStack(pt.stack);
             pool.allocator.destroy(pt.task);
             return;
         };
-        const poll_ctx = @import("fiber.zig").parked_poll_ctx orelse {
+        const poll_ctx = yield_info.poll_ctx orelse {
+            pool.allocator.destroy(pt.fiber);
             pool.releaseStack(pt.stack);
             pool.allocator.destroy(pt.task);
             return;
         };
         parked.append(pool.allocator, .{
-            .fiber_ctx = ctx.*,
+            .fiber = pt.fiber,
             .task = pt.task,
             .poll_fn = poll,
             .poll_ctx = poll_ctx,
@@ -262,13 +264,12 @@ fn resumeParked(pool: *WorkerPool, pt: *ParkedTask, parked: *std.ArrayList(Parke
         }) catch {
             // OOM: cannot re-park the fiber. Release stack and task
             // to avoid leaking resources since the poll may never trigger.
+            pool.allocator.destroy(pt.fiber);
             pool.releaseStack(pt.stack);
             pool.allocator.destroy(pt.task);
         };
-        @import("fiber.zig").parked_ctx = null;
-        @import("fiber.zig").parked_poll = null;
-        @import("fiber.zig").parked_poll_ctx = null;
     } else {
+        pool.allocator.destroy(pt.fiber);
         pool.releaseStack(pt.stack);
         pool.allocator.destroy(pt.task);
     }

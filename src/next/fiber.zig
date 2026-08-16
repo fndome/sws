@@ -8,23 +8,30 @@ pub const FiberCall = struct {
     execFn: *const fn (?*anyopaque, *const fn (?*anyopaque, []const u8) void) void,
 };
 
+/// Yield out-params returned by `Fiber.exec`. When a worker fiber calls
+/// `workerYield`, it parks itself and communicates the suspension point plus
+/// the poll callback through this struct — no process-wide globals.
+pub const YieldInfo = struct {
+    ctx: IoFiber.Context,
+    call: FiberCall,
+    poll: ?*const fn (*anyopaque) bool,
+    poll_ctx: ?*anyopaque,
+};
+
 threadlocal var active_call: ?FiberCall = null;
 threadlocal var caller_context: ?*IoFiber.Context = null;
 
 /// The currently executing fiber context, used by components like Pipe for yield
 threadlocal var current_context: ?*IoFiber.Context = null;
+/// The currently executing fiber instance (set by exec); workerYield writes its
+/// yield out-params here so exec can return them instead of using globals.
+threadlocal var current_fiber: ?*Fiber = null;
 
 /// ── yield/resume state ──
 threadlocal var yielded_fiber: ?*IoFiber.Context = null;
 threadlocal var yielded_result: ?[]const u8 = null;
 pub threadlocal var saved_call: ?FiberCall = null;
 threadlocal var yield_seq: u64 = 0;
-
-/// ── worker thread parking state (transient; read by workerLoop after fiber.exec returns) ──
-pub threadlocal var parked_ctx: ?*IoFiber.Context = null;
-pub threadlocal var parked_call: ?FiberCall = null;
-pub threadlocal var parked_poll: ?*const fn (*anyopaque) bool = null;
-pub threadlocal var parked_poll_ctx: ?*anyopaque = null;
 
 /// ── yield cleanup callback: invoked when the fiber fully completes (resumed and did not yield again) ──
 pub const YieldCleanup = struct {
@@ -44,6 +51,8 @@ fn trampoline() void {
 
 pub const Fiber = struct {
     context: IoFiber.Context,
+    /// Yield out-params written by workerYield before suspension; exec returns them.
+    yield_info: ?YieldInfo = null,
 
     pub fn init(stack: []u8) Fiber {
         const sp = @intFromPtr(stack.ptr + stack.len);
@@ -58,15 +67,19 @@ pub const Fiber = struct {
         };
     }
 
-    pub fn exec(self: *Fiber, c: FiberCall) void {
+    pub fn exec(self: *Fiber, c: FiberCall) ?YieldInfo {
         active_call = c;
         current_context = &self.context;
+        current_fiber = self;
+        self.yield_info = null;
         var caller = Fiber{ .context = undefined };
         caller_context = &caller.context;
         _ = IoFiber.contextSwitch(&.{ .old = &caller.context, .new = &self.context });
+        current_fiber = null;
         current_context = null;
         active_call = null;
         caller_context = null;
+        return self.yield_info;
     }
 
     pub fn currentYield() void {
@@ -163,18 +176,24 @@ pub const Fiber = struct {
     /// Called inside a worker fiber: yields the current fiber and registers a poll callback.
     /// The worker thread's tick periodically calls pollFn; when it returns true this fiber is resumed.
     pub fn workerYield(pollFn: *const fn (*anyopaque) bool, pollCtx: *anyopaque) void {
-        parked_poll = pollFn;
-        parked_poll_ctx = pollCtx;
+        const self = current_fiber orelse return;
+        self.yield_info = .{
+            .ctx = self.context,
+            .call = active_call.?,
+            .poll = pollFn,
+            .poll_ctx = pollCtx,
+        };
         currentYield();
-        parked_ctx = yielded_fiber;
-        parked_call = saved_call;
     }
 
-    /// Called from the worker thread's tick: resumes a saved fiber context
-    pub fn resumeContext(ctx: *IoFiber.Context) void {
-        yielded_fiber = ctx;
-        // saved_call should already be set by the caller or stored alongside
+    /// Called from the worker thread's tick: resumes a parked fiber instance.
+    /// Re-establishes `current_fiber` so a subsequent workerYield can write its
+    /// yield out-params back to this fiber's `yield_info` field.
+    pub fn resumeContext(fiber: *Fiber) void {
+        current_fiber = fiber;
+        yielded_fiber = &fiber.context;
         resumeYielded("");
+        current_fiber = null;
     }
 
     /// Fiber yield/resume slot used by the DNS resolver on the IO thread.

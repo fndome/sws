@@ -163,7 +163,7 @@ pub fn main() !void {
     defer io_backend.deinit();
     const io = io_backend.io();
 
-    var server = try AsyncServer.init(alloc, io, addr, null, 64, null, .{});
+    var server = try AsyncServer.init(alloc, io, .{ .listen_addr = addr });
     defer server.deinit();
     try server.GET("/bench", benchHandler);
     server.installSigterm();

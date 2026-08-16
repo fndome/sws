@@ -343,7 +343,7 @@ fn handleRequest(allocator: Allocator, ctx_ptr: **RequestContext) void {
         return;
     };
     var fiber = Fiber.init(stack);
-    fiber.exec(.{
+    _ = fiber.exec(.{
         .userCtx = @ptrCast(ctx),
         .complete = struct {
             fn done(_: ?*anyopaque, _: []const u8) void {}

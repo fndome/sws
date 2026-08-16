@@ -511,7 +511,7 @@ fn dispatchToHandler(self: *AsyncServer, conn_id: u64, conn: *Connection, path: 
     } else {
         var fiber = Fiber.init(self.shared_fiber_stack);
         self.shared_fiber_active = true;
-        fiber.exec(.{
+        _ = fiber.exec(.{
             .userCtx = t,
             .complete = httpTaskComplete,
             .execFn = httpTaskExec,
