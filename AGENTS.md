@@ -38,5 +38,5 @@ Notes:
 
 ## Deferred
 
-- Multi-crate split (`sw-core` / `sw-httpclient` / `sws`) waits for Zig 1.0 — see `ROADMAP.md`.
+- Multi-crate split waits for Zig 1.0 — see `ROADMAP.md`; sequencing and reverse-edge inventory live in `MODULE_BOUNDARY_PLAN.md`.
 - Code-quality backlog is tracked in `NOT_GOOD_CODE.md` and `CODE_QUALITY_PLAN.md`.

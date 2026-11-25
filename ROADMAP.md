@@ -83,6 +83,9 @@ Coordinating three repos through unstable `build.zig.zon` and `--dep` semantics 
 more friction than it removes. All internal refactoring (fiber_task rename, SlotPool
 generalization, buffer pool extraction) happens here to prepare for the eventual split.
 
+Sequencing, the current reverse-edge inventory, and the untangling steps are tracked in
+`MODULE_BOUNDARY_PLAN.md`.
+
 ### Why not split now
 
 - `zig fetch` / `b.dependency()` semantics change between minor Zig versions.
