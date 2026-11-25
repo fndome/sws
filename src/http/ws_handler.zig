@@ -47,16 +47,33 @@ fn wsFrameInput(allocator: Allocator, conn: *Connection, data: []u8, owned_out: 
 fn storeIncompleteWsFrame(allocator: Allocator, conn: *Connection, data: []u8, owned_data: *?[]u8) !void {
     if (data.len > MAX_WS_ACCUMULATED_FRAME_SIZE) return error.FrameTooLarge;
     if (owned_data.*) |owned| {
-        conn.accum_buf = owned;
-        owned_data.* = null;
-        return;
+        // Adopt the owned buffer only when the whole buffer is still unconsumed.
+        // When several frames shared the read, `data` is the unconsumed tail and
+        // keeping `owned` would replay already-processed frames.
+        if (data.ptr == owned.ptr and data.len == owned.len) {
+            conn.accum_buf = owned;
+            owned_data.* = null;
+            return;
+        }
     }
     conn.accum_buf = try allocator.dupe(u8, data);
 }
 
+/// Return the provided read buffer to the io_uring pool exactly once and mark it
+/// recycled. Resetting read_bid also prevents closeConn from recycling it again.
+fn recycleWsReadBid(self: *AsyncServer, conn: *Connection, bid: u16) void {
+    if (bid != NO_READ_BUFFER_BID) self.buffer_pool.markReplenish(bid);
+    conn.read_bid = NO_READ_BUFFER_BID;
+    conn.read_buf_recycled = true;
+    conn.read_len = 0;
+}
+
 fn finishSynchronousWsHandler(self: *AsyncServer, conn_id: u64, conn: *Connection, bid: u16) void {
     // The synchronous fallback handler's payload may still point into the read buffer, so the bid must be returned only after the handler returns.
-    if (bid != NO_READ_BUFFER_BID) self.buffer_pool.markReplenish(bid);
+    if (bid != NO_READ_BUFFER_BID and conn.read_bid == bid) {
+        self.buffer_pool.markReplenish(bid);
+        conn.read_bid = NO_READ_BUFFER_BID;
+    }
     conn.read_buf_recycled = true;
     conn.read_len = 0;
     if (conn.state != .ws_writing) {
@@ -219,196 +236,226 @@ pub fn onWsFrame(self: *AsyncServer, conn_id: u64, res: i32, user_data: u64, cqe
         slot.line2.last_active_ms = now_ws;
     }
 
-    const frame = ws_frame.parseFrame(frame_input) catch |err| {
-        switch (err) {
-            error.IncompleteFrame => {
-                // TCP may split one WebSocket frame across multiple reads; accumulate the partial frame
-                // and wait for the next segment instead of treating it as a protocol error and disconnecting.
-                storeIncompleteWsFrame(self.allocator, conn, frame_input, &owned_frame_input) catch {
-                    self.buffer_pool.markReplenish(bid);
-                    conn.read_len = 0;
+    var offset: usize = 0;
+    while (offset < frame_input.len) {
+        const parsed = ws_frame.parseFrameWithLength(frame_input[offset..]) catch |err| {
+            switch (err) {
+                error.IncompleteFrame => {
+                    // TCP may split one WebSocket frame across multiple reads; accumulate the partial frame
+                    // and wait for the next segment instead of treating it as a protocol error and disconnecting.
+                    // Only the unconsumed tail is stored: earlier frames in this same read were already handled.
+                    storeIncompleteWsFrame(self.allocator, conn, frame_input[offset..], &owned_frame_input) catch {
+                        recycleWsReadBid(self, conn, bid);
+                        self.closeConn(conn_id, conn.fd);
+                        return;
+                    };
+                    recycleWsReadBid(self, conn, bid);
+                    if (conn.state != .ws_writing) {
+                        conn.state = .ws_reading;
+                        self.submitRead(conn_id, conn) catch {
+                            self.closeConn(conn_id, conn.fd);
+                        };
+                    }
+                    return;
+                },
+                else => {
+                    recycleWsReadBid(self, conn, bid);
+                    self.closeConn(conn_id, conn.fd);
+                    return;
+                },
+            }
+        };
+        const frame = parsed.frame;
+        offset += parsed.consumed;
+        var yielded_here = false;
+
+        if (self.connSlot(conn)) |slot| {
+            const ww = sticker.wsWork(slot);
+            ww.payload_len = frame.payload.len;
+            ww.is_final = frame.fin;
+        }
+
+        switch (frame.opcode) {
+            .close => {
+                // A control response may arrive while an application/protocol write
+                // is still in flight. Queue it instead of overwriting response_buf.
+                if (shouldQueueWsSend(conn)) {
+                    enqueueWsFrame(self, conn, .close, frame.payload) catch {
+                        recycleWsReadBid(self, conn, bid);
+                        self.closeConn(conn_id, conn.fd);
+                        return;
+                    };
+                    // The closing handshake has started; ignore any bytes after it.
+                    recycleWsReadBid(self, conn, bid);
+                    return;
+                }
+                const total = ws_frame.frameSize(frame.payload.len);
+                if (!self.ensureWriteBuf(conn, total)) {
+                    recycleWsReadBid(self, conn, bid);
+                    self.closeConn(conn_id, conn.fd);
+                    return;
+                }
+                const wbuf = conn.response_buf.?;
+                _ = ws_frame.writeFrame(wbuf, .{
+                    .opcode = .close,
+                    .fin = true,
+                    .payload = frame.payload,
+                }) catch {
+                    recycleWsReadBid(self, conn, bid);
                     self.closeConn(conn_id, conn.fd);
                     return;
                 };
-                self.buffer_pool.markReplenish(bid);
-                conn.read_len = 0;
-                conn.state = .ws_reading;
-                self.submitRead(conn_id, conn) catch {
+                recycleWsReadBid(self, conn, bid);
+                conn.write_headers_len = total;
+                conn.write_offset = 0;
+                conn.state = .ws_writing;
+                conn.keep_alive = false;
+                self.submitWrite(conn_id, conn) catch {
                     self.closeConn(conn_id, conn.fd);
                 };
                 return;
             },
-            else => {
-                self.buffer_pool.markReplenish(bid);
-                conn.read_len = 0;
-                self.closeConn(conn_id, conn.fd);
-                return;
+            .ping => {
+                if (shouldQueueWsSend(conn)) {
+                    enqueueWsFrame(self, conn, .pong, frame.payload) catch {
+                        recycleWsReadBid(self, conn, bid);
+                        self.closeConn(conn_id, conn.fd);
+                        return;
+                    };
+                    continue;
+                }
+                const pong_total = ws_frame.frameSize(frame.payload.len);
+                if (!self.ensureWriteBuf(conn, pong_total)) {
+                    recycleWsReadBid(self, conn, bid);
+                    self.closeConn(conn_id, conn.fd);
+                    return;
+                }
+                const wbuf = conn.response_buf.?;
+                _ = ws_frame.writeFrame(wbuf, .{
+                    .opcode = .pong,
+                    .fin = true,
+                    .payload = frame.payload,
+                }) catch {
+                    recycleWsReadBid(self, conn, bid);
+                    self.closeConn(conn_id, conn.fd);
+                    return;
+                };
+                recycleWsReadBid(self, conn, bid);
+                conn.write_headers_len = pong_total;
+                conn.write_offset = 0;
+                conn.state = .ws_writing;
+                self.submitWrite(conn_id, conn) catch {
+                    self.closeConn(conn_id, conn.fd);
+                };
+                // Keep consuming this read; any following frame will see
+                // ws_writing and be queued behind the pong.
             },
-        }
-    };
-
-    if (self.connSlot(conn)) |slot| {
-            const ww = sticker.wsWork(slot);
-        ww.payload_len = frame.payload.len;
-        ww.is_final = frame.fin;
-    }
-
-    switch (frame.opcode) {
-        .close => {
-            const total = ws_frame.frameSize(frame.payload.len);
-            if (!self.ensureWriteBuf(conn, total)) {
-                self.buffer_pool.markReplenish(bid);
-                conn.read_len = 0;
-                self.closeConn(conn_id, conn.fd);
-                return;
-            }
-            const wbuf = conn.response_buf.?;
-            _ = ws_frame.writeFrame(wbuf, .{
-                .opcode = .close,
-                .fin = true,
-                .payload = frame.payload,
-            }) catch {
-                self.buffer_pool.markReplenish(bid);
-                conn.read_len = 0;
-                self.closeConn(conn_id, conn.fd);
-                return;
-            };
-            self.buffer_pool.markReplenish(bid);
-            conn.read_len = 0;
-            conn.write_headers_len = total;
-            conn.write_offset = 0;
-            conn.state = .ws_writing;
-            conn.keep_alive = false;
-            self.submitWrite(conn_id, conn) catch {
-                self.closeConn(conn_id, conn.fd);
-            };
-        },
-        .ping => {
-            const pong_total = ws_frame.frameSize(frame.payload.len);
-            if (!self.ensureWriteBuf(conn, pong_total)) {
-                self.buffer_pool.markReplenish(bid);
-                conn.read_len = 0;
-                conn.state = .ws_reading;
-                self.submitRead(conn_id, conn) catch {
+            .pong => {
+                // No response required; just consume it and continue with the next frame.
+            },
+            .text, .binary, .continuation => {
+                const handler = self.ws_server.getActive(conn_id) orelse {
+                    recycleWsReadBid(self, conn, bid);
                     self.closeConn(conn_id, conn.fd);
+                    return;
                 };
-                return;
-            }
-            const wbuf = conn.response_buf.?;
-            _ = ws_frame.writeFrame(wbuf, .{
-                .opcode = .pong,
-                .fin = true,
-                .payload = frame.payload,
-            }) catch {
-                self.buffer_pool.markReplenish(bid);
-                conn.read_len = 0;
-                conn.state = .ws_reading;
-                self.submitRead(conn_id, conn) catch {
-                    self.closeConn(conn_id, conn.fd);
-                };
-                return;
-            };
-            self.buffer_pool.markReplenish(bid);
-            conn.read_len = 0;
-            conn.write_headers_len = pong_total;
-            conn.write_offset = 0;
-            conn.state = .ws_writing;
-            self.submitWrite(conn_id, conn) catch {
-                self.closeConn(conn_id, conn.fd);
-            };
-        },
-        .pong => {
-            self.buffer_pool.markReplenish(bid);
-            conn.read_len = 0;
-            conn.state = .ws_reading;
-            self.submitRead(conn_id, conn) catch {
-                self.closeConn(conn_id, conn.fd);
-            };
-        },
-        .text, .binary, .continuation => {
-            const handler = self.ws_server.getActive(conn_id) orelse {
-                self.buffer_pool.markReplenish(bid);
-                conn.read_len = 0;
-                self.closeConn(conn_id, conn.fd);
-                return;
-            };
 
-            var payload_full: []u8 = undefined;
-            var payload_tier: u8 = 0;
-            if (self.buffer_pool.allocTieredWriteBuf(frame.payload.len)) |a| {
-                @memcpy(a.buf[0..frame.payload.len], frame.payload);
-                payload_full = a.buf;
-                payload_tier = @intCast(a.tier);
-            } else {
-                payload_full = self.allocator.dupe(u8, frame.payload) catch {
-                    handler(conn_id, &frame, self.ws_server.ctx);
+                var payload_full: []u8 = undefined;
+                var payload_tier: u8 = 0;
+                if (self.buffer_pool.allocTieredWriteBuf(frame.payload.len)) |a| {
+                    @memcpy(a.buf[0..frame.payload.len], frame.payload);
+                    payload_full = a.buf;
+                    payload_tier = @intCast(a.tier);
+                } else {
+                    payload_full = self.allocator.dupe(u8, frame.payload) catch {
+                        handler(conn_id, &frame, self.ws_server.ctx);
+                        finishSynchronousWsHandler(self, conn_id, conn, bid);
+                        return;
+                    };
+                    payload_tier = 0xFF;
+                }
+
+                var frame_copy = frame;
+                frame_copy.payload = payload_full[0..frame.payload.len];
+
+                const t = self.ws_ctx_pool.create(self.allocator) catch {
+                    var fallback_frame = frame;
+                    fallback_frame.payload = payload_full[0..frame.payload.len];
+                    handler(conn_id, &fallback_frame, self.ws_server.ctx);
+                    self.buffer_pool.freeTieredWriteBuf(payload_full, payload_tier);
                     finishSynchronousWsHandler(self, conn_id, conn, bid);
                     return;
                 };
-                payload_tier = 0xFF;
-            }
+                t.* = .{
+                    .tag = WS_TASK_TAG,
+                    .server = self,
+                    .conn_id = conn_id,
+                    .read_bid = NO_READ_BUFFER_BID,
+                    .payload_tier = payload_tier,
+                    .handler = handler,
+                    .frame = frame_copy,
+                    .payload_buf = payload_full,
+                };
 
-            var frame_copy = frame;
-            frame_copy.payload = payload_full[0..frame.payload.len];
-
-            const t = self.ws_ctx_pool.create(self.allocator) catch {
-                var fallback_frame = frame;
-                fallback_frame.payload = payload_full[0..frame.payload.len];
-                handler(conn_id, &fallback_frame, self.ws_server.ctx);
-                self.buffer_pool.freeTieredWriteBuf(payload_full, payload_tier);
-                finishSynchronousWsHandler(self, conn_id, conn, bid);
-                return;
-            };
-            t.* = .{
-                .tag = WS_TASK_TAG,
-                .server = self,
-                .conn_id = conn_id,
-                .read_bid = bid,
-                .payload_tier = payload_tier,
-                .handler = handler,
-                .frame = frame_copy,
-                .payload_buf = payload_full,
-            };
-
-            if (self.shared_fiber_active) {
-                if (self.next) |*n| {
-                    if (n.push(fiber_task.WsTaskCtx, t.*, fiber_task.wsTaskExecWrapperWithOwnership, self.cfg.fiber_stack_size_kb * 1024)) {
-                        self.ws_ctx_pool.destroy(t);
+                if (self.shared_fiber_active) {
+                    if (self.next) |*n| {
+                        if (n.push(fiber_task.WsTaskCtx, t.*, fiber_task.wsTaskExecWrapperWithOwnership, self.cfg.fiber_stack_size_kb * 1024)) {
+                            self.ws_ctx_pool.destroy(t);
+                        } else {
+                            // On WS task enqueue failure the payload captured before the copy must be freed to avoid a pool leak.
+                            fiber_task.wsTaskCleanup(t);
+                            recycleWsReadBid(self, conn, bid);
+                            self.closeConn(conn_id, conn.fd);
+                            return;
+                        }
                     } else {
-                        // On WS task enqueue failure the payload captured before the copy must be freed to avoid a pool leak.
-                        fiber_task.wsTaskCleanup(t);
-                        self.closeConn(conn_id, conn.fd);
+                        self.buffer_pool.freeTieredWriteBuf(payload_full, payload_tier);
+                        self.ws_ctx_pool.destroy(t);
+                        handler(conn_id, &frame, self.ws_server.ctx);
+                        finishSynchronousWsHandler(self, conn_id, conn, bid);
                         return;
                     }
                 } else {
-                    self.buffer_pool.freeTieredWriteBuf(payload_full, payload_tier);
-                    self.ws_ctx_pool.destroy(t);
-                    handler(conn_id, &frame, self.ws_server.ctx);
-                    finishSynchronousWsHandler(self, conn_id, conn, bid);
+                    var fiber = Fiber.init(self.shared_fiber_stack);
+                    self.shared_fiber_active = true;
+                    const seq_before = Fiber.yieldSequence();
+                    _ = fiber.exec(.{
+                        .userCtx = t,
+                        .complete = fiber_task.wsTaskComplete,
+                        .execFn = fiber_task.wsTaskExec,
+                    });
+                    yielded_here = Fiber.yieldSequence() != seq_before;
+                }
+            },
+        }
+
+        // A handler that yielded must not lose bytes that followed its frame in
+        // the same read. Copy the tail into accum_buf; the fiber completion path
+        // re-arms the read, which will merge it with the next segment.
+        if (yielded_here) {
+            if (offset < frame_input.len) {
+                if (frame_input.len - offset > MAX_WS_ACCUMULATED_FRAME_SIZE) {
+                    recycleWsReadBid(self, conn, bid);
+                    self.closeConn(conn_id, conn.fd);
                     return;
                 }
-            } else {
-                var fiber = Fiber.init(self.shared_fiber_stack);
-                self.shared_fiber_active = true;
-                _ = fiber.exec(.{
-                    .userCtx = t,
-                    .complete = fiber_task.wsTaskComplete,
-                    .execFn = fiber_task.wsTaskExec,
-                });
-                // If the handler yielded (e.g. DB / DNS wait), do NOT
-                // re-arm the read here. The complete callback fires
-                // after resume and handles read submission, preserving
-                // frame ordering.
-                if (Fiber.isYielded()) return;
-            }
-
-            if (conn.state != .ws_writing) {
-                conn.state = .ws_reading;
-                self.submitRead(conn_id, conn) catch {
+                conn.accum_buf = self.allocator.dupe(u8, frame_input[offset..]) catch {
+                    recycleWsReadBid(self, conn, bid);
                     self.closeConn(conn_id, conn.fd);
+                    return;
                 };
             }
-        },
+            recycleWsReadBid(self, conn, bid);
+            return;
+        }
+    }
+
+    recycleWsReadBid(self, conn, bid);
+    if (conn.state != .ws_writing) {
+        conn.state = .ws_reading;
+        self.submitRead(conn_id, conn) catch {
+            self.closeConn(conn_id, conn.fd);
+        };
     }
 }
 
@@ -455,26 +502,27 @@ fn shouldQueueWsSend(conn: *const Connection) bool {
     return conn.is_writing or conn.state == .ws_writing;
 }
 
+/// Append a frame to the per-connection write queue. The payload is copied, so
+/// callers may pass slices into the read buffer (which is recycled afterwards).
+fn enqueueWsFrame(self: *AsyncServer, conn: *Connection, opcode: Opcode, payload: []const u8) !void {
+    const dup = self.allocator.dupe(u8, payload) catch return error.OutOfMemory;
+    errdefer self.allocator.free(dup);
+    const node = self.allocator.create(WsWriteQueueNode) catch return error.OutOfMemory;
+    node.* = .{ .opcode = opcode, .payload = dup, .next = null };
+    if (conn.ws_write_queue_tail) |tail| {
+        tail.next = node;
+    } else {
+        conn.ws_write_queue_head = node;
+    }
+    conn.ws_write_queue_tail = node;
+}
+
 pub fn sendWsFrame(self: *AsyncServer, conn_id: u64, opcode: Opcode, payload: []const u8) !void {
     const conn = self.getConn(conn_id) orelse return;
 
     // Protocol-level ping/close responses enter ws_writing without setting is_writing, so application sends must queue to avoid clobbering response_buf.
     if (shouldQueueWsSend(conn)) {
-        const dup = self.allocator.dupe(u8, payload) catch {
-            return error.OutOfMemory;
-        };
-        const node = self.allocator.create(WsWriteQueueNode) catch {
-            self.allocator.free(dup);
-            return error.OutOfMemory;
-        };
-        node.* = .{ .opcode = opcode, .payload = dup, .next = null };
-        if (conn.ws_write_queue_tail) |tail| {
-            tail.next = node;
-        } else {
-            conn.ws_write_queue_head = node;
-        }
-        conn.ws_write_queue_tail = node;
-        return;
+        return enqueueWsFrame(self, conn, opcode, payload);
     }
 
     conn.is_writing = true;
@@ -523,6 +571,10 @@ pub fn flushWsWriteQueue(self: *AsyncServer, conn_id: u64, conn: *Connection) vo
             self.closeConn(conn_id, conn.fd);
             return;
         };
+        // A queued close must close the connection only after the close frame is
+        // actually submitted; setting this at enqueue time would make an earlier
+        // in-flight write's completion drop the queued close.
+        if (opcode == .close) conn.keep_alive = false;
         self.allocator.free(payload);
     } else {
         conn.is_writing = false;

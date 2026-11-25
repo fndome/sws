@@ -2,7 +2,17 @@ const std = @import("std");
 const Opcode = @import("types.zig").Opcode;
 pub const Frame = @import("types.zig").Frame;
 
+pub const ParsedFrame = struct {
+    frame: Frame,
+    /// Number of bytes consumed from the input slice, including header and mask key.
+    consumed: usize,
+};
+
 pub fn parseFrame(data: []u8) !Frame {
+    return (try parseFrameWithLength(data)).frame;
+}
+
+pub fn parseFrameWithLength(data: []u8) !ParsedFrame {
     if (data.len < 2) return error.IncompleteFrame;
 
     const first_byte = data[0];
@@ -74,7 +84,10 @@ pub fn parseFrame(data: []u8) !Frame {
         if (!isValidCloseCode(code)) return error.InvalidFrame;
     }
 
-    return Frame{ .opcode = opcode, .fin = fin, .payload = payload };
+    return .{
+        .frame = Frame{ .opcode = opcode, .fin = fin, .payload = payload },
+        .consumed = offset + payload_len_usize,
+    };
 }
 
 fn isValidCloseCode(code: u16) bool {
@@ -152,6 +165,22 @@ test "writeFrame rejects invalid outbound control frames" {
     try std.testing.expectError(error.InvalidFrame, writeFrame(&out, .{ .opcode = .pong, .fin = false, .payload = empty[0..] }));
     try std.testing.expectError(error.InvalidFrame, writeFrame(&out, .{ .opcode = .close, .fin = true, .payload = one_byte_close[0..] }));
     try std.testing.expectError(error.InvalidFrame, writeFrame(&out, .{ .opcode = .close, .fin = true, .payload = invalid_close_code[0..] }));
+}
+
+test "parseFrameWithLength reports consumed bytes for back-to-back frames" {
+    var data = [_]u8{
+        0x81, 0x85, 1, 2, 3, 4, 0x69, 0x67, 0x6f, 0x68, 0x6e,
+        0x89, 0x80, 4, 3, 2, 1,
+    };
+    const first = try parseFrameWithLength(data[0..]);
+    try std.testing.expectEqual(@as(usize, 11), first.consumed);
+    try std.testing.expectEqual(Opcode.text, first.frame.opcode);
+    try std.testing.expectEqualStrings("hello", first.frame.payload);
+
+    const second = try parseFrameWithLength(data[first.consumed..]);
+    try std.testing.expectEqual(@as(usize, 6), second.consumed);
+    try std.testing.expectEqual(Opcode.ping, second.frame.opcode);
+    try std.testing.expectEqual(@as(usize, data.len), first.consumed + second.consumed);
 }
 
 pub fn frameSize(payload_len: usize) usize {

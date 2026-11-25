@@ -42,10 +42,13 @@ fn wsTaskRecycle(t: *WsTaskCtx) void {
     // buffer id 0 must still be replenished, so compare against the sentinel.
     if (t.read_bid != NO_READ_BUFFER_BID) {
         t.server.buffer_pool.markReplenish(t.read_bid);
-    }
-    if (t.server.connections.getPtr(t.conn_id)) |conn| {
-        conn.read_buf_recycled = true;
-        conn.read_len = 0;
+        // Only touch connection read bookkeeping when this task owns the buffer.
+        // A task created for a frame that shared a multi-frame read has no bid:
+        // a newer read may already be in flight and must not be clobbered.
+        if (t.server.connections.getPtr(t.conn_id)) |conn| {
+            conn.read_buf_recycled = true;
+            conn.read_len = 0;
+        }
     }
     // Next.push copies the task and frees its memory itself, so here only the task-owned payload is released.
     t.server.buffer_pool.freeTieredWriteBuf(t.payload_buf, t.payload_tier);

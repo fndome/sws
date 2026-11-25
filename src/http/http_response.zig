@@ -37,14 +37,18 @@ pub fn headerOnlyCapacity(extra_headers_len: usize) usize {
 }
 
 pub fn ensureWriteBuf(self: *AsyncServer, conn: *Connection, min_size: usize) bool {
+    // Never hand out a write buffer while a write SQE is still in flight: callers
+    // write into response_buf directly, so reusing it here would overwrite bytes
+    // the kernel has not sent yet. This applies even when the buffer is already
+    // large enough, not only when a replacement allocation is needed.
+    if (self.connSlot(conn)) |slot| {
+        if (slot.line4.writev_in_flight != 0) {
+            logErr("ensureWriteBuf: refusing in-flight write buffer for fd={d}", .{conn.fd});
+            return false;
+        }
+    }
     if (conn.response_buf) |existing| {
         if (existing.len >= min_size) return true;
-        if (self.connSlot(conn)) |slot| {
-            if (slot.line4.writev_in_flight != 0) {
-                logErr("ensureWriteBuf: refusing to replace in-flight write buffer for fd={d}", .{conn.fd});
-                return false;
-            }
-        }
         self.buffer_pool.freeTieredWriteBuf(existing, conn.response_buf_tier);
         conn.response_buf = null;
     }

@@ -102,6 +102,10 @@ pub inline fn unpackGenId(ud: u64) u32 {
 
 /// Flag bits reserved above gen_id range
 pub const CLOSE_USER_DATA_FLAG: u64 = 1 << 60; // close SQE marker
+/// Server connection write SQE marker. Bit 61 is safe here: ACCEPT_USER_DATA and
+/// TCP_ACCEPT_USER_DATA are matched by exact value, and a real connection token
+/// always has a non-zero gen_id, so it can never collide with those sentinels.
+pub const WRITE_USER_DATA_FLAG: u64 = 1 << 61;
 
 pub inline fn unpackIdx(ud: u64) u32 {
     return @truncate(ud);

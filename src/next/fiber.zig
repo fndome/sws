@@ -75,6 +75,10 @@ pub const Fiber = struct {
         var caller = Fiber{ .context = undefined };
         caller_context = &caller.context;
         _ = IoFiber.contextSwitch(&.{ .old = &caller.context, .new = &self.context });
+        // The switch saved the suspended cpu state into self.context; refresh the
+        // yield snapshot so YieldInfo.ctx reflects the resumable state rather than
+        // the pre-yield copy taken by workerYield.
+        if (self.yield_info) |*yi| yi.ctx = self.context;
         current_fiber = null;
         current_context = null;
         active_call = null;
@@ -87,16 +91,18 @@ pub const Fiber = struct {
         yielded_fiber = ctx;
         saved_call = active_call;
         yield_seq +%= 1;
-        var tmp: IoFiber.Context = undefined;
-        _ = IoFiber.contextSwitch(&.{ .old = &tmp, .new = caller_context.? });
+        // Save the suspended cpu state into the same Context that resumeYielded
+        // passes as `.new`. Writing it to a local would make resume jump back to
+        // the trampoline entry and re-run execFn from the beginning.
+        _ = IoFiber.contextSwitch(&.{ .old = ctx, .new = caller_context.? });
     }
 
     pub fn yieldCurrent(self: *Fiber) void {
         yielded_fiber = &self.context;
         saved_call = active_call;
         yield_seq +%= 1;
-        var tmp: IoFiber.Context = undefined;
-        _ = IoFiber.contextSwitch(&.{ .old = &tmp, .new = caller_context.? });
+        // Same reason as currentYield: `.old` must be the object later resumed.
+        _ = IoFiber.contextSwitch(&.{ .old = &self.context, .new = caller_context.? });
     }
 
     /// Deferred resume queue: during CQE processing fibers are not resumed directly; they are enqueued and resumed in batch by the main loop.
@@ -173,6 +179,13 @@ pub const Fiber = struct {
         return yielded_fiber != null;
     }
 
+    /// Monotonic per-thread yield counter. Callers compare before/after a fiber
+    /// step to tell whether *that* step suspended, without being confused by a
+    /// different fiber that was already parked.
+    pub fn yieldSequence() u64 {
+        return yield_seq;
+    }
+
     /// Called inside a worker fiber: yields the current fiber and registers a poll callback.
     /// The worker thread's tick periodically calls pollFn; when it returns true this fiber is resumed.
     pub fn workerYield(pollFn: *const fn (*anyopaque) bool, pollCtx: *anyopaque) void {
@@ -194,6 +207,9 @@ pub const Fiber = struct {
         yielded_fiber = &fiber.context;
         resumeYielded("");
         current_fiber = null;
+        // A second (or later) yield updates self.context inside currentYield, after
+        // workerYield took its pre-yield copy; refresh the snapshot for consumers.
+        if (fiber.yield_info) |*yi| yi.ctx = fiber.context;
     }
 
     /// Fiber yield/resume slot used by the DNS resolver on the IO thread.
@@ -223,3 +239,40 @@ pub const Fiber = struct {
         caller_context = null;
     }
 };
+
+const YieldResumeTest = struct {
+    enter: usize = 0,
+    after: usize = 0,
+
+    fn complete(_: ?*anyopaque, _: []const u8) void {}
+
+    fn exec(user_ctx: ?*anyopaque, _: *const fn (?*anyopaque, []const u8) void) void {
+        const self: *YieldResumeTest = @ptrCast(@alignCast(user_ctx));
+        self.enter += 1;
+        Fiber.currentYield();
+        self.after += 1;
+    }
+};
+
+test "resume continues after the yield point instead of re-running execFn" {
+    const stack = try std.testing.allocator.alloc(u8, 64 * 1024);
+    defer std.testing.allocator.free(stack);
+
+    var t = YieldResumeTest{};
+    var fiber = Fiber.init(stack);
+    _ = fiber.exec(.{
+        .userCtx = &t,
+        .complete = YieldResumeTest.complete,
+        .execFn = YieldResumeTest.exec,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), t.enter);
+    try std.testing.expectEqual(@as(usize, 0), t.after);
+    try std.testing.expect(Fiber.isYielded());
+
+    Fiber.resumeYielded("");
+
+    try std.testing.expectEqual(@as(usize, 1), t.enter);
+    try std.testing.expectEqual(@as(usize, 1), t.after);
+    try std.testing.expect(!Fiber.isYielded());
+}

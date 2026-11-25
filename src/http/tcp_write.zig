@@ -4,6 +4,7 @@ const linux = std.os.linux;
 const AsyncServer = @import("async_server.zig").AsyncServer;
 const Connection = @import("connection.zig").Connection;
 const packUserData = @import("../stack_pool.zig").packUserData;
+const WRITE_USER_DATA_FLAG = @import("../stack_pool.zig").WRITE_USER_DATA_FLAG;
 const logErr = @import("http_helpers.zig").logErr;
 const milliTimestamp = @import("event_loop.zig").milliTimestamp;
 const TlsStream = @import("../tls/tls.zig").TlsStream;
@@ -103,7 +104,7 @@ pub fn submitWrite(self: *AsyncServer, conn_id: u64, conn: *Connection) !void {
         }
     }
 
-    const user_data = packUserData(conn.gen_id, conn.pool_idx);
+    const user_data = packUserData(conn.gen_id, conn.pool_idx) | WRITE_USER_DATA_FLAG;
     const fd = conn.ioFd();
 
     const resp_buf = conn.response_buf orelse return;
@@ -232,144 +233,144 @@ pub fn onWriteComplete(self: *AsyncServer, conn_id: u64, res: i32, user_data: u6
 
 fn submitTlsWrite(self: *AsyncServer, conn_id: u64, conn: *Connection, tls_stream: *TlsStream) !void {
     if (build_options.tls_enabled) {
-    const user_data = packUserData(conn.gen_id, conn.pool_idx);
-    const fd = conn.ioFd();
+        const user_data = packUserData(conn.gen_id, conn.pool_idx) | WRITE_USER_DATA_FLAG;
+        const fd = conn.ioFd();
 
-    const resp_buf = conn.response_buf orelse return;
+        const resp_buf = conn.response_buf orelse return;
 
-    // Defensive: closeConn and general write paths guard pool_idx; TLS
-    // path was missed when TLS support was added in #58.
-    const slot = self.connSlot(conn) orelse {
-        logErr("submitTlsWrite: no pool slot for fd={d}, closing", .{conn.fd});
-        self.closeConn(conn_id, conn.fd);
-        return;
-    };
+        // Defensive: closeConn and general write paths guard pool_idx; TLS
+        // path was missed when TLS support was added in #58.
+        const slot = self.connSlot(conn) orelse {
+            logErr("submitTlsWrite: no pool slot for fd={d}, closing", .{conn.fd});
+            self.closeConn(conn_id, conn.fd);
+            return;
+        };
 
-    if (slot.line4.writev_in_flight != 0) {
-        return error.WriteInFlight;
-    }
-
-    const header_len = @min(conn.write_headers_len, resp_buf.len);
-
-    const max_ciphertext = TLS_MAX_PLAINTEXT + TLS_CIPHERTEXT_OVERHEAD;
-    if (conn.tls_ciphertext == null) {
-        conn.tls_ciphertext = self.allocator.alloc(u8, max_ciphertext) catch return error.OutOfMemory;
-    }
-    var ciphertext_buf = conn.tls_ciphertext.?;
-    var plaintext_buf: [TLS_MAX_PLAINTEXT]u8 = [_]u8{0} ** TLS_MAX_PLAINTEXT;
-    var plaintext_len: usize = 0;
-
-    if (conn.write_offset < header_len) {
-        const hdr_part = resp_buf[conn.write_offset..header_len];
-        const n = @min(hdr_part.len, plaintext_buf.len - plaintext_len);
-        @memcpy(plaintext_buf[plaintext_len..][0..n], hdr_part[0..n]);
-        plaintext_len += n;
-    }
-
-    if (conn.write_body) |body| {
-        if (plaintext_len < plaintext_buf.len) {
-            const body_start = if (conn.write_offset > header_len)
-            conn.write_offset - header_len
-        else
-            0;
-        const body_part = body[body_start..];
-        const n = @min(body_part.len, plaintext_buf.len - plaintext_len);
-        @memcpy(plaintext_buf[plaintext_len..][0..n], body_part[0..n]);
-        plaintext_len += n;
+        if (slot.line4.writev_in_flight != 0) {
+            return error.WriteInFlight;
         }
-    }
 
-    if (plaintext_len == 0) return;
+        const header_len = @min(conn.write_headers_len, resp_buf.len);
 
-    const ciphertext_len = tls_stream.write(plaintext_buf[0..plaintext_len], ciphertext_buf) catch {
-        return error.TlsWriteFailed;
-    };
-    if (ciphertext_len == 0) return;
+        const max_ciphertext = TLS_MAX_PLAINTEXT + TLS_CIPHERTEXT_OVERHEAD;
+        if (conn.tls_ciphertext == null) {
+            conn.tls_ciphertext = self.allocator.alloc(u8, max_ciphertext) catch return error.OutOfMemory;
+        }
+        var ciphertext_buf = conn.tls_ciphertext.?;
+        var plaintext_buf: [TLS_MAX_PLAINTEXT]u8 = [_]u8{0} ** TLS_MAX_PLAINTEXT;
+        var plaintext_len: usize = 0;
 
-    slot.line4.writev_in_flight = 1;
-    _ = self.ring.write(user_data, fd, ciphertext_buf[0..ciphertext_len], 0) catch {
-        slot.line4.writev_in_flight = 0;
-        try queuePendingWrite(self, conn_id, conn);
-        return;
-    };
-    conn.tls_write_len = @intCast(ciphertext_len);
+        if (conn.write_offset < header_len) {
+            const hdr_part = resp_buf[conn.write_offset..header_len];
+            const n = @min(hdr_part.len, plaintext_buf.len - plaintext_len);
+            @memcpy(plaintext_buf[plaintext_len..][0..n], hdr_part[0..n]);
+            plaintext_len += n;
+        }
+
+        if (conn.write_body) |body| {
+            if (plaintext_len < plaintext_buf.len) {
+                const body_start = if (conn.write_offset > header_len)
+                    conn.write_offset - header_len
+                else
+                    0;
+                const body_part = body[body_start..];
+                const n = @min(body_part.len, plaintext_buf.len - plaintext_len);
+                @memcpy(plaintext_buf[plaintext_len..][0..n], body_part[0..n]);
+                plaintext_len += n;
+            }
+        }
+
+        if (plaintext_len == 0) return;
+
+        const ciphertext_len = tls_stream.write(plaintext_buf[0..plaintext_len], ciphertext_buf) catch {
+            return error.TlsWriteFailed;
+        };
+        if (ciphertext_len == 0) return;
+
+        slot.line4.writev_in_flight = 1;
+        _ = self.ring.write(user_data, fd, ciphertext_buf[0..ciphertext_len], 0) catch {
+            slot.line4.writev_in_flight = 0;
+            try queuePendingWrite(self, conn_id, conn);
+            return;
+        };
+        conn.tls_write_len = @intCast(ciphertext_len);
     }
 }
 
 fn onTlsWriteComplete(self: *AsyncServer, conn_id: u64, conn: *Connection, res: i32) void {
     if (build_options.tls_enabled) {
-    if (res <= 0) {
-        failWrite(self, conn_id, conn);
-        return;
-    }
-
-    if (conn.tls_write_len > 0 and @as(u32, @intCast(res)) != conn.tls_write_len) {
-        if (self.connSlot(conn)) |slot| {
-            slot.line4.writev_in_flight = 0;
+        if (res <= 0) {
+            failWrite(self, conn_id, conn);
+            return;
         }
-        conn.tls_write_len = 0;
-        self.closeConn(conn_id, conn.fd);
-        return;
-    }
-    conn.tls_write_len = 0;
 
-    const header_len = if (conn.response_buf) |rb|
-        @min(conn.write_headers_len, rb.len)
-    else
-        0;
-    const body_len = if (conn.write_body) |b| b.len else 0;
-    const total = write_progress.writeTotal(header_len, body_len);
-
-    // Advance write_offset by the plaintext that was encrypted in submitTlsWrite.
-    // submitTlsWrite packs up to 16384 bytes of plaintext per chunk.
-    conn.write_offset += write_progress.tlsChunkAdvance(total, conn.write_offset);
-
-    if (conn.write_offset >= total) {
-        finishWriteCleanup(self, conn);
-        if (self.ws_server.getActive(conn_id) != null) {
-            conn.keep_alive = true;
-            conn.write_offset = 0;
-            conn.write_headers_len = 0;
-            conn.state = .ws_reading;
-            self.submitRead(conn_id, conn) catch |err| {
-                logErr("submitRead failed for WS upgrade fd {}: {s}", .{ conn.fd, @errorName(err) });
-                self.closeConn(conn_id, conn.fd);
-            };
-        } else if (conn.keep_alive) {
-            conn.write_start_ms = 0;
-            conn.state = .reading;
-            conn.read_len = 0;
-            conn.write_offset = 0;
-            conn.write_headers_len = 0;
-            conn.last_active_ms = milliTimestamp(self.io);
-            if (self.connSlot(conn)) |slot| {
-                slot.line2.last_active_ms = conn.last_active_ms;
-            }
-            self.submitRead(conn_id, conn) catch |err| {
-                logErr("submitRead failed for keep-alive fd {}: {s}", .{ conn.fd, @errorName(err) });
-                self.closeConn(conn_id, conn.fd);
-            };
-        } else {
-            self.closeConn(conn_id, conn.fd);
-        }
-    } else {
-        // More plaintext to encrypt, submit next chunk
-        if (self.connSlot(conn)) |slot| {
-            slot.line4.writev_in_flight = 0;
-        }
-        // Partial progress: refresh the timer so write_timeout_ms tracks time
-        // since last progress rather than since the write started.
-        conn.write_start_ms = milliTimestamp(self.io);
-        if (self.connSlot(conn)) |slot| {
-            slot.line2.write_start_ms = conn.write_start_ms;
-        }
-        self.submitWrite(conn_id, conn) catch |err| {
-            logErr("submitWrite failed for TLS chunk fd {}: {s}", .{ conn.fd, @errorName(err) });
+        if (conn.tls_write_len > 0 and @as(u32, @intCast(res)) != conn.tls_write_len) {
             if (self.connSlot(conn)) |slot| {
                 slot.line4.writev_in_flight = 0;
             }
+            conn.tls_write_len = 0;
             self.closeConn(conn_id, conn.fd);
-        };
-    }
+            return;
+        }
+        conn.tls_write_len = 0;
+
+        const header_len = if (conn.response_buf) |rb|
+            @min(conn.write_headers_len, rb.len)
+        else
+            0;
+        const body_len = if (conn.write_body) |b| b.len else 0;
+        const total = write_progress.writeTotal(header_len, body_len);
+
+        // Advance write_offset by the plaintext that was encrypted in submitTlsWrite.
+        // submitTlsWrite packs up to 16384 bytes of plaintext per chunk.
+        conn.write_offset += write_progress.tlsChunkAdvance(total, conn.write_offset);
+
+        if (conn.write_offset >= total) {
+            finishWriteCleanup(self, conn);
+            if (self.ws_server.getActive(conn_id) != null) {
+                conn.keep_alive = true;
+                conn.write_offset = 0;
+                conn.write_headers_len = 0;
+                conn.state = .ws_reading;
+                self.submitRead(conn_id, conn) catch |err| {
+                    logErr("submitRead failed for WS upgrade fd {}: {s}", .{ conn.fd, @errorName(err) });
+                    self.closeConn(conn_id, conn.fd);
+                };
+            } else if (conn.keep_alive) {
+                conn.write_start_ms = 0;
+                conn.state = .reading;
+                conn.read_len = 0;
+                conn.write_offset = 0;
+                conn.write_headers_len = 0;
+                conn.last_active_ms = milliTimestamp(self.io);
+                if (self.connSlot(conn)) |slot| {
+                    slot.line2.last_active_ms = conn.last_active_ms;
+                }
+                self.submitRead(conn_id, conn) catch |err| {
+                    logErr("submitRead failed for keep-alive fd {}: {s}", .{ conn.fd, @errorName(err) });
+                    self.closeConn(conn_id, conn.fd);
+                };
+            } else {
+                self.closeConn(conn_id, conn.fd);
+            }
+        } else {
+            // More plaintext to encrypt, submit next chunk
+            if (self.connSlot(conn)) |slot| {
+                slot.line4.writev_in_flight = 0;
+            }
+            // Partial progress: refresh the timer so write_timeout_ms tracks time
+            // since last progress rather than since the write started.
+            conn.write_start_ms = milliTimestamp(self.io);
+            if (self.connSlot(conn)) |slot| {
+                slot.line2.write_start_ms = conn.write_start_ms;
+            }
+            self.submitWrite(conn_id, conn) catch |err| {
+                logErr("submitWrite failed for TLS chunk fd {}: {s}", .{ conn.fd, @errorName(err) });
+                if (self.connSlot(conn)) |slot| {
+                    slot.line4.writev_in_flight = 0;
+                }
+                self.closeConn(conn_id, conn.fd);
+            };
+        }
     }
 }

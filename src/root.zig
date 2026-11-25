@@ -154,6 +154,7 @@ test {
     _ = @import("client/http_client.zig");
     _ = @import("client/tiny_cache.zig");
     _ = @import("dns/resolver.zig");
+    _ = @import("next/fiber.zig");
     _ = @import("next/pipe.zig");
     _ = @import("shared/tcp_stream.zig");
     _ = @import("shared/io_registry.zig");
