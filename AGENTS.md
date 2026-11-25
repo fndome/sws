@@ -25,6 +25,7 @@ Notes:
 - **Pure logic stays testable.** Any code that does not import `std.os.linux` / io_uring / `AsyncServer` should live in its own module with inline `test` blocks so it runs on the host via `zig test`.
 - When you add a new pure module with tests, register it in the `test {}` blocks of both `src/root.zig` and `src/root_dev.zig`.
 - Comments are written in English.
+- Before changing fiber, WebSocket read, write-buffer, or CQE-dispatch code, run the audit in `BUG_CHECK_GUIDE.md`.
 - Split large functions/files by responsibility; move pure logic out first (see `LARGE_FILE_SPLIT_PLAN.md`).
 
 ## Where things live
